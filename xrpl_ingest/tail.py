@@ -1,0 +1,66 @@
+"""Live tail: follow validated ledgers as they close, resuming from a stored checkpoint."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Callable, Optional
+
+from pymongo.errors import PyMongoError
+
+from .errors import RpcError, TransientError
+from .fetcher import RetryPolicy, Sleep, ingest_ledger
+
+log = logging.getLogger(__name__)
+
+BIG_GAP = 1000  # ledgers behind before we suggest a backfill
+
+
+async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: float,
+               stop_check: Callable[[], bool], sleep: Sleep = asyncio.sleep,
+               max_iterations: Optional[int] = None) -> int:
+    """Run until stop_check() is true (or max_iterations, for tests). Returns last checkpoint.
+
+    A ledger that fails all retries is recorded in the failed collection and the checkpoint
+    still advances, so one bad ledger cannot stall the tail; `retry-failed` picks it up later.
+    """
+    last = await asyncio.to_thread(store.get_checkpoint)
+    iterations = 0
+    node_failures = 0
+
+    while not stop_check():
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        iterations += 1
+
+        try:
+            latest = await source.latest_validated()
+            node_failures = 0
+        except (TransientError, RpcError) as e:
+            log.warning("cannot read latest validated ledger: %s", e)
+            await sleep(retry.delay(node_failures))
+            node_failures += 1
+            continue
+
+        if last == 0:
+            last = latest - 1  # first run: start at the current ledger
+            log.info("no checkpoint; starting at ledger %d", latest)
+
+        if latest <= last:
+            await sleep(poll_interval)
+            continue
+
+        if latest - last > BIG_GAP:
+            log.warning("%d ledgers behind; consider `backfill` for the catch-up range", latest - last)
+
+        for idx in range(last + 1, latest + 1):
+            if stop_check():
+                return last
+            res = await ingest_ledger(source, store, idx, retry)
+            if not res.ok:
+                log.error("ledger %d recorded as failed; continuing", idx)
+            last = idx
+            try:
+                await asyncio.to_thread(store.set_checkpoint, idx)
+            except PyMongoError as e:
+                log.warning("checkpoint write failed at %d (%s); will catch up", idx, e)
+    return last

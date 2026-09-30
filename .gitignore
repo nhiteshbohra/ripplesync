@@ -1,0 +1,31 @@
+# Local configuration and secrets
+.env
+!.env.example
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime output
+*.log
+process_status.txt
+
+# Local virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
