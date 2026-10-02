@@ -78,11 +78,14 @@ install_node() {
   else warn "no 'xrpld' user found; fix ownership of $DB_PATH to match the service user"; fi
 
   say "Editing $CFG (backup made; history=$HISTORY_MODE)"
+  $SUDO mkdir -p "$(dirname "$CFG")" /etc/opt/ripple
   local peers=() p
   IFS=';' read -ra parts <<<"${FIXED_PEERS:-}"
   for p in "${parts[@]:-}"; do [ -n "$p" ] && peers+=(--peer "$p"); done
   $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$CFG" --db-path "$DB_PATH" \
        --history "$HISTORY_MODE" --node-size "$NODE_SIZE" "${peers[@]}"
+  $SUDO ln -sf "$CFG" /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
+  $SUDO ln -sf "$CFG" /etc/opt/ripple/rippled.cfg 2>/dev/null || true
   [ "$HISTORY_MODE" = full ] && [ -z "${FIXED_PEERS:-}" ] && \
     warn "full history: add [ips_fixed] peers that hold full history (see xrpl.org 'Configure Full History'); re-run with FIXED_PEERS='host port'"
 

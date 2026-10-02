@@ -195,6 +195,7 @@ else
 fi
 
 say "Configuring /etc/xrpl/xrpld.cfg (Mode: $HISTORY_MODE, Size: $NODE_SIZE, WS Port: 6006)..."
+$SUDO mkdir -p /etc/xrpl /etc/opt/ripple
 PEER_ARGS=()
 if [ -n "$FIXED_PEERS" ]; then
   IFS=';' read -ra PARTS <<< "$FIXED_PEERS"
@@ -208,6 +209,9 @@ $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" /etc/xrpl/xrpld.cfg \
   --history "$HISTORY_MODE" \
   --node-size "$NODE_SIZE" \
   "${PEER_ARGS[@]}"
+
+$SUDO ln -sf /etc/xrpl/xrpld.cfg /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
+$SUDO ln -sf /etc/xrpl/xrpld.cfg /etc/opt/ripple/rippled.cfg 2>/dev/null || true
 
 if has_systemd; then
   say "Starting xrpld service..."

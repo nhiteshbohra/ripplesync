@@ -7,6 +7,7 @@ usage: edit_cfg.py CFG --db-path PATH [--history full|pruned] [--node-size huge]
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
@@ -112,6 +113,7 @@ def main(argv=None) -> int:
         shutil.copyfile(a.cfg, backup)
         print(f"backup: {backup}")
     new = apply(text, db_path=a.db_path, history=a.history, node_size=a.node_size, peers=a.peer)
+    os.makedirs(os.path.dirname(os.path.abspath(a.cfg)), exist_ok=True)
     with open(a.cfg, "w", encoding="utf-8") as f:
         f.write(new)
     print(f"updated {a.cfg} (history={a.history}, node_size={a.node_size}, db={a.db_path})")
