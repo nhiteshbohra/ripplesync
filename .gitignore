@@ -1,5 +1,6 @@
 # Local configuration and secrets
 .env
+.env.*
 !.env.example
 
 # Python caches and tooling
@@ -37,3 +38,5 @@ git-claude-attribution-audit.md
 DECISIONS.md
 CLAUDE.md
 ai-context-discipline-prompt.md
+# Claude Code local state (agent worktrees)
+.claude/

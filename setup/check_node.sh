@@ -4,13 +4,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .venv/bin/activate
 python - <<'PY'
-import asyncio, os
+import asyncio, os, re
 from dotenv import load_dotenv
 from xrpl_ingest.source import WsSource
 load_dotenv(os.path.join(os.getcwd(), ".env"))
 
 async def main():
-    s = WsSource([u.strip() for u in os.environ.get("SERVERS", "ws://127.0.0.1:6006").replace("\n", ",").split(",") if u.strip()],
+    s = WsSource([u for u in re.split(r"[,\s]+", os.environ.get("SERVERS", "ws://127.0.0.1:6006")) if u],
                  request_timeout=10, connect_retries=1)
     try:
         info = await s.server_info()

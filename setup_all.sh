@@ -46,7 +46,7 @@ need_ok() {
   if [ "$FORCE" = 1 ]; then
     warn "$1 (continuing because FORCE=1)"
   else
-    die "$1 (set FORCE=1 or pass --force to bypass)"
+    die "$1 (set FORCE=1 to bypass)"
   fi
 }
 
@@ -77,7 +77,7 @@ echo "Configuration:"
 echo "  Mode:       $HISTORY_MODE"
 echo "  Node Size:  $NODE_SIZE"
 echo "  DB Path:    $DB_PATH"
-echo "  MongoDB:    $MONGO_URI"
+echo "  MongoDB:    $(printf '%s' "$MONGO_URI" | sed -E 's#//[^@/]*@#//***@#')"  # hide credentials
 echo ""
 
 # ------------------------------------------------------------------------------
@@ -262,7 +262,7 @@ echo ""
 say "[Phase 5/6] Verifying Tests & Connections"
 
 say "Running pytest suite..."
-(cd "$REPO_DIR" && .venv/bin/python -m pytest -q) && ok "All tests passed successfully"
+(cd "$REPO_DIR" && .venv/bin/python -m pytest -q) && ok "All tests passed successfully" || die "Test suite failed; fix it before continuing"
 
 say "Verifying MongoDB connectivity..."
 (cd "$REPO_DIR" && .venv/bin/python - <<'PY'
@@ -273,7 +273,7 @@ load_dotenv()
 uri = os.environ.get("MONGO_URI", "mongodb://127.0.0.1:27017")
 try:
     MongoClient(uri, serverSelectionTimeoutMS=4000).admin.command("ping")
-    print(f"MongoDB connected successfully at {uri}")
+    print("MongoDB connected successfully")
 except Exception as e:
     print(f"MongoDB connection failed: {e}", file=sys.stderr)
     sys.exit(1)
@@ -313,7 +313,7 @@ fi
 cat << EOF
 
 ====================================================================
-${GREEN}✔ COMPLETE SETUP FINISHED SUCCESSFULLY!${NC}
+✔ COMPLETE SETUP FINISHED SUCCESSFULLY!
 ====================================================================
 
 Components Installed & Running:
