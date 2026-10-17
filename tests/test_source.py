@@ -68,8 +68,14 @@ def test_request_success_and_api_version():
 
 
 def test_reconnect_backoff_for_huge_attempt_is_capped_not_overflow():
-    s = WsSource(["ws://a"], backoff_base=1.0, backoff_max=30.0)
+    s = WsSource(["ws://a"], backoff_base=1.0, backoff_max=30.0, jitter=False)
     assert s._backoff(5000) == 30.0
+
+
+def test_reconnect_backoff_is_jittered_by_default():
+    s = WsSource(["ws://a"], backoff_base=1.0, backoff_max=30.0)
+    samples = [s._backoff(2) for _ in range(200)]
+    assert all(2.0 <= d <= 4.0 for d in samples) and len(set(samples)) > 1
 
 
 def test_error_response_raises_rpcerror():

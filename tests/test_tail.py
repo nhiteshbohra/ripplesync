@@ -110,7 +110,7 @@ def test_tail_survives_more_than_1024_node_failures(store):
     src = FakeSource(latest=100)
     src.latest_errors = [ConnectFailed("down")] * 1100
     sleeps = []
-    retry = RetryPolicy(attempts=5, base=1.0, max_delay=30.0)
+    retry = RetryPolicy(attempts=5, base=1.0, max_delay=30.0, jitter=False)
     last = asyncio.run(tail(src, store, retry, poll_interval=2.0, stop_check=lambda: False,
                             sleep=lambda d: no_sleep(sleeps.append(d)), max_iterations=1101))
     assert last == 100 and len(sleeps) == 1100 and sleeps[-1] == 30.0
@@ -206,7 +206,7 @@ def test_unrecorded_failure_backoff_grows_and_resets(store, monkeypatch):
         if len(sleeps) == 3:
             state["down"] = False
 
-    retry = RetryPolicy(attempts=1, base=1.0, max_delay=100.0)
+    retry = RetryPolicy(attempts=1, base=1.0, max_delay=100.0, jitter=False)
     asyncio.run(tail(FakeSource(latest=100), store, retry, poll_interval=0.5,
                      stop_check=lambda: False, sleep=sleep, max_iterations=5))
     assert sleeps == [1.0, 2.0, 4.0, 0.5]  # three stalls, recovery, then one idle poll
@@ -221,7 +221,7 @@ def test_unrecorded_failure_backoff_is_bounded(store, monkeypatch):
     async def sleep(d):
         sleeps.append(d)
 
-    retry = RetryPolicy(attempts=1, base=1.0, max_delay=float("inf"))
+    retry = RetryPolicy(attempts=1, base=1.0, max_delay=float("inf"), jitter=False)
     asyncio.run(tail(FakeSource(latest=100), store, retry, poll_interval=0.5,
                      stop_check=lambda: False, sleep=sleep, max_iterations=40))
     assert len(sleeps) == 40 and sleeps[-1] == sleeps[-2] < float("inf")

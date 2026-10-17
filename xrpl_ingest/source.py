@@ -9,9 +9,9 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 from urllib.parse import urlsplit
 
 from .config import Config
-from .constants import MAX_BACKOFF_EXPONENT
 from .errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
                      RpcError, TransientError)
+from .fetcher import RetryPolicy
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class WsSource:
                  connect_retries: int = 5, backoff_base: float = 1.0, backoff_max: float = 30.0,
                  expected_network_id: Optional[int] = 0, max_message_bytes: int = 64 * 1024 * 1024,
                  connect_fn: Optional[ConnectFn] = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, jitter: bool = True):
         if not servers:
             raise ValueError("at least one server is required")
         self.servers = tuple(servers)
@@ -74,6 +74,7 @@ class WsSource:
         self.connect_retries = connect_retries
         self.backoff_base = backoff_base
         self.backoff_max = backoff_max
+        self._reconnect = RetryPolicy(connect_retries, backoff_base, backoff_max, jitter=jitter)
         self.expected_network_id = expected_network_id
         self.max_message_bytes = max_message_bytes
         self._connect_fn = connect_fn or _default_connect
@@ -92,7 +93,7 @@ class WsSource:
     # -- connection management ------------------------------------------------
 
     def _backoff(self, attempt: int) -> float:
-        return min(self.backoff_max, self.backoff_base * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
+        return self._reconnect.delay(attempt)  # same capped, jittered formula as ledger retries
 
     async def _get_conn(self) -> _Conn:
         if self._lock is None:

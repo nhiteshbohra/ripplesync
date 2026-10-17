@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from .constants import MAX_BACKOFF_EXPONENT
@@ -20,9 +21,14 @@ class RetryPolicy:
     attempts: int = 5
     base: float = 1.0
     max_delay: float = 30.0
+    jitter: bool = True  # tests that assert exact delays turn it off
+    rng: Callable[[], float] = field(default=random.random, repr=False, compare=False)
 
     def delay(self, attempt: int) -> float:
-        return min(self.max_delay, self.base * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
+        """Exponential backoff capped at max_delay, with "equal jitter" (d/2 + random d/2)
+        so that many ledgers failing together do not all retry at the same instant."""
+        d = min(self.max_delay, self.base * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
+        return d / 2 + self.rng() * d / 2 if self.jitter else d
 
 
 @dataclass

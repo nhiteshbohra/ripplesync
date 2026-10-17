@@ -125,14 +125,28 @@ def test_rerun_is_idempotent(store):
 
 
 def test_backoff_delays_grow_and_cap():
-    p = RetryPolicy(attempts=5, base=1, max_delay=5)
+    p = RetryPolicy(attempts=5, base=1, max_delay=5, jitter=False)
     assert [p.delay(i) for i in range(5)] == [1, 2, 4, 5, 5]
 
 
 def test_backoff_delay_for_huge_attempt_is_capped_not_overflow():
-    p = RetryPolicy(attempts=5, base=1.0, max_delay=30.0)
+    p = RetryPolicy(attempts=5, base=1.0, max_delay=30.0, jitter=False)
     assert p.delay(5000) == 30.0
     assert RetryPolicy(base=1.0, max_delay=float("inf")).delay(5000) < float("inf")
+
+
+def test_jitter_is_equal_jitter_bounded_by_max_delay():
+    low = RetryPolicy(base=1.0, max_delay=8.0, rng=lambda: 0.0)
+    high = RetryPolicy(base=1.0, max_delay=8.0, rng=lambda: 1.0)
+    assert [low.delay(i) for i in range(5)] == [0.5, 1.0, 2.0, 4.0, 4.0]
+    assert [high.delay(i) for i in range(5)] == [1.0, 2.0, 4.0, 8.0, 8.0]
+    assert high.delay(5000) == 8.0
+
+
+def test_jitter_on_by_default_spreads_retries():
+    p = RetryPolicy(base=1.0, max_delay=30.0)
+    samples = [p.delay(3) for _ in range(200)]
+    assert all(4.0 <= d <= 8.0 for d in samples) and len(set(samples)) > 1
 
 
 def test_sleep_called_between_attempts_only(store):
@@ -142,5 +156,5 @@ def test_sleep_called_between_attempts_only(store):
         delays.append(d)
 
     src = FakeSource({100: [RequestTimeout("t")] * 5})
-    run(ingest_ledger(src, store, 100, RetryPolicy(3, 1, 30), sleep=rec))
+    run(ingest_ledger(src, store, 100, RetryPolicy(3, 1, 30, jitter=False), sleep=rec))
     assert delays == [1, 2]
