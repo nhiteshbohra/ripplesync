@@ -4,6 +4,7 @@ from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, no_sleep
 from xrpl_ingest.errors import ConnectFailed, RpcError
+from xrpl_ingest.fetcher import RetryPolicy
 from xrpl_ingest.tail import tail
 
 
@@ -96,3 +97,85 @@ def test_reprocessing_after_lost_checkpoint_is_idempotent(store):
     run_tail(FakeSource(latest=100), store, iterations=1)
     assert store.ledgers.count_documents({}) == 2
     assert store.txs.count_documents({}) == 4
+
+
+def mongo_outage(store, monkeypatch):
+    """Ledger, failure and checkpoint writes raise AutoReconnect while state["down"] is true."""
+    state = {"down": True}
+
+    def guard(method):
+        def wrapper(*args, **kwargs):
+            if state["down"]:
+                raise AutoReconnect("mongo down")
+            return method(*args, **kwargs)
+        return wrapper
+
+    for name in ("save_ledger_bundle", "record_failure", "set_checkpoint"):
+        monkeypatch.setattr(store, name, guard(getattr(store, name)))
+    return state
+
+
+def test_unrecorded_failure_holds_checkpoint_and_retries(store, monkeypatch):
+    store.set_checkpoint(98)
+    state = mongo_outage(store, monkeypatch)
+    seen = []
+
+    async def sleep(_):
+        seen.append(store.get_checkpoint())
+        state["down"] = False  # Mongo comes back during the backoff
+
+    src = FakeSource(latest=100)
+    last = asyncio.run(tail(src, store, FAST_RETRY, poll_interval=2.0, stop_check=lambda: False,
+                            sleep=sleep, max_iterations=2))
+    assert seen == [98]  # held at 98 while 99 could be neither stored nor recorded
+    assert src.calls == [99] * FAST_RETRY.attempts + [99, 100]  # stalled on 99, then retried it
+    assert last == 100 and store.get_checkpoint() == 100
+    assert store.ledgers.count_documents({"block_number": 99}) == 1
+    assert store.list_failed() == []
+
+
+def test_unrecorded_failure_backoff_grows_and_resets(store, monkeypatch):
+    store.set_checkpoint(98)
+    state = mongo_outage(store, monkeypatch)
+    sleeps = []
+
+    async def sleep(d):
+        sleeps.append(d)
+        if len(sleeps) == 3:
+            state["down"] = False
+
+    retry = RetryPolicy(attempts=1, base=1.0, max_delay=100.0)
+    asyncio.run(tail(FakeSource(latest=100), store, retry, poll_interval=0.5,
+                     stop_check=lambda: False, sleep=sleep, max_iterations=5))
+    assert sleeps == [1.0, 2.0, 4.0, 0.5]  # three stalls, recovery, then one idle poll
+    assert store.get_checkpoint() == 100
+
+
+def test_unrecorded_failure_backoff_is_bounded(store, monkeypatch):
+    store.set_checkpoint(98)
+    mongo_outage(store, monkeypatch)  # stays down
+    sleeps = []
+
+    async def sleep(d):
+        sleeps.append(d)
+
+    retry = RetryPolicy(attempts=1, base=1.0, max_delay=float("inf"))
+    asyncio.run(tail(FakeSource(latest=100), store, retry, poll_interval=0.5,
+                     stop_check=lambda: False, sleep=sleep, max_iterations=40))
+    assert len(sleeps) == 40 and sleeps[-1] == sleeps[-2] < float("inf")
+    assert store.get_checkpoint() == 98
+
+
+def test_stop_flag_during_unrecorded_failure_backoff(store, monkeypatch):
+    store.set_checkpoint(98)
+    mongo_outage(store, monkeypatch)  # stays down
+    stopped = {"v": False}
+
+    async def sleep(_):
+        stopped["v"] = True  # stop file flipped while tail is backing off
+
+    src = FakeSource(latest=100)
+    last = asyncio.run(tail(src, store, FAST_RETRY, poll_interval=2.0,
+                            stop_check=lambda: stopped["v"], sleep=sleep, max_iterations=10))
+    assert last == 98 and store.get_checkpoint() == 98
+    assert src.calls == [99] * FAST_RETRY.attempts

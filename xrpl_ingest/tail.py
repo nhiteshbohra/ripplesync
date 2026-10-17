@@ -13,6 +13,7 @@ from .fetcher import RetryPolicy, Sleep, ingest_ledger
 log = logging.getLogger(__name__)
 
 BIG_GAP = 1000  # ledgers behind before we suggest a backfill
+MAX_STALL_STEP = 16  # caps the backoff exponent so 2**n stays a sane float
 
 
 async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: float,
@@ -22,10 +23,13 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
 
     A ledger that fails all retries is recorded in the failed collection and the checkpoint
     still advances, so one bad ledger cannot stall the tail; `retry-failed` picks it up later.
+    If the failure cannot be recorded either (Mongo down), the checkpoint stays put and the
+    same ledger is retried after a backoff, so nothing is skipped silently.
     """
     last = await asyncio.to_thread(store.get_checkpoint)
     iterations = 0
     node_failures = 0
+    stalls = 0
 
     while not stop_check():
         if max_iterations is not None and iterations >= max_iterations:
@@ -56,6 +60,13 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             if stop_check():
                 return last
             res = await ingest_ledger(source, store, idx, retry)
+            if not res.ok and not res.recorded:
+                log.error("ledger %d failed and could not be recorded; holding checkpoint at %d",
+                          idx, last)
+                await sleep(retry.delay(stalls))
+                stalls = min(stalls + 1, MAX_STALL_STEP)
+                break  # next while-iteration retries from last + 1
+            stalls = 0
             if not res.ok:
                 log.error("ledger %d recorded as failed; continuing", idx)
             last = idx
