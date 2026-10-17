@@ -99,7 +99,11 @@ def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[
 
 
 def write_atomic(path: str, text: str) -> None:
-    """Write via a temp file in the same dir + os.replace; keep the original mode and owner."""
+    """Write via a temp file in the same dir + os.replace; keep the original mode and owner.
+
+    A symlinked cfg is written through to its target, so the link itself survives.
+    """
+    path = os.path.realpath(path)
     try:
         st = os.stat(path)
     except FileNotFoundError:

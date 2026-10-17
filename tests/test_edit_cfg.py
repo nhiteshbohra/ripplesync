@@ -109,6 +109,36 @@ def test_failed_write_keeps_original_and_leaves_no_temp(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == ["xrpld.cfg"]
 
 
+def _symlink_or_skip(target, link):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as e:  # Windows without Developer Mode / admin
+        pytest.skip(f"symlinks unavailable here: {e}")
+
+
+def test_cli_writes_through_symlink_and_keeps_link(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    target = real_dir / "xrpld.cfg"
+    target.write_text(SAMPLE)
+    link = tmp_path / "link.cfg"
+    _symlink_or_skip(target, link)
+    assert edit_cfg.main([str(link), "--db-path", "/x"]) == 0
+    assert link.is_symlink() and os.path.samefile(link, target)
+    assert "path=/x" in target.read_text()
+    assert not [p for p in real_dir.iterdir() if p.name.startswith(".edit_cfg.")]  # no temp left
+
+
+def test_write_atomic_targets_resolved_path(tmp_path, monkeypatch):
+    """Portable stand-in for the symlink test: the write goes to realpath(), not the given path."""
+    given, resolved = tmp_path / "given.cfg", tmp_path / "resolved.cfg"
+    given.write_text("link stand-in\n")
+    resolved.write_text(SAMPLE)
+    monkeypatch.setattr(edit_cfg.os.path, "realpath", lambda p: str(resolved))
+    edit_cfg.write_atomic(str(given), "new\n")
+    assert resolved.read_text() == "new\n" and given.read_text() == "link stand-in\n"
+
+
 # POSIX permission bits are not meaningful on Windows (chmod only toggles read-only).
 posix_only = pytest.mark.skipif(os.name == "nt", reason="file mode bits not meaningful on Windows")
 
