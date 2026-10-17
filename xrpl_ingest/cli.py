@@ -6,27 +6,30 @@ import asyncio
 import sys
 from typing import List, Optional
 
+from pymongo.errors import ConfigurationError, PyMongoError
+
 from .backfill import discover_node, retry_failed, retry_policy, run_backfill
 from .config import Config, setup_logging
 from .constants import FIRST_LEDGER
-from .errors import ConfigError
+from .errors import ConfigError, IngestError, NetworkMismatch
 from .source import WsSource
 from .stopflag import stop_requested
 from .store import MongoStore
 from .tail import tail
 
 VERIFY_WINDOW = 10_000
+EXIT_CODES = (
+    "exit codes: 0 = ok; 1 = some ledgers failed, the run stopped early, or verify found "
+    "problems; 2 = config/usage error (incl. node on the wrong network); 3 = backfill had no "
+    "failures, but the node lacks some requested ledgers (see its complete_ledgers); "
+    "4 = node or MongoDB unreachable / error; 130 = interrupted")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="xrpl_ingest")
+    p = argparse.ArgumentParser(prog="xrpl_ingest", epilog=EXIT_CODES)
     sub = p.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser(
-        "backfill", help="fetch historical ledgers (resumable)",
-        epilog="exit codes: 0 = all requested ledgers stored; 1 = some ledgers failed or the run "
-               "stopped early; 2 = config error; 3 = no failures, but the node lacks some "
-               "requested ledgers (see its complete_ledgers); 130 = interrupted")
+    b = sub.add_parser("backfill", help="fetch historical ledgers (resumable)", epilog=EXIT_CODES)
     b.add_argument("--start", type=int, default=FIRST_LEDGER)
     b.add_argument("--end", type=int, default=None, help="default: node's latest validated ledger")
 
@@ -76,7 +79,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             store.close()
     except KeyboardInterrupt:
         return 130
+    except (IngestError, PyMongoError, ValueError) as e:  # ValueError: bad --start/--end
+        print(f"error: {_describe(e)}", file=sys.stderr)
+        return error_exit_code(e)
     return 2
+
+
+def error_exit_code(e: BaseException) -> int:
+    """2 when fixing config/arguments is needed, 4 when the node or MongoDB failed."""
+    return 2 if isinstance(e, (NetworkMismatch, ValueError, ConfigurationError)) else 4
+
+
+def _describe(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"
 
 
 def backfill_exit_code(summary: dict) -> int:
@@ -123,11 +138,16 @@ def _verify(store: MongoStore, start: int, end: int) -> int:
 
 
 async def _status(cfg: Config, store: MongoStore) -> int:
+    """Node part first; DB stats are printed even when the node cannot be reached."""
+    code = 0
     source = WsSource.from_config(cfg)
     try:
         ranges, latest = await discover_node(source)
         print(f"node complete_ledgers: {ranges}  latest validated: {latest}")
+    except IngestError as e:
+        print(f"node: error: {_describe(e)}")
+        code = error_exit_code(e)
     finally:
         await source.close()
-    print(f"database: {store.stats()}")
-    return 0
+    print(f"database: {await asyncio.to_thread(store.stats)}")
+    return code
