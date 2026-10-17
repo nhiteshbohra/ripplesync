@@ -22,7 +22,8 @@ INT_FIELDS = (
     "Fee", "Flags", "DestinationTag", "SourceTag", "Sequence",
     "LastLedgerSequence", "OfferSequence", "PreviousTxnLgrSeq",
 )
-AMOUNT_FIELDS = ("Amount", "TakerGets", "TakerPays")  # str drops (XRP) or dict (issued)
+# str drops (XRP) or dict (issued). DeliverMax: API v2 Payment field that replaces Amount.
+AMOUNT_FIELDS = ("Amount", "DeliverMax", "TakerGets", "TakerPays")
 
 _INT_RE = re.compile(r"^-?\d+$")
 
@@ -43,6 +44,14 @@ def close_time_iso(close_time: int) -> str:
     if not close_time:
         return ""
     return datetime.fromtimestamp(close_time + RIPPLE_EPOCH_OFFSET, timezone.utc).isoformat()
+
+
+def copy_deliver_max(doc: Dict[str, Any]) -> None:
+    """API v2 sends a Payment's Amount as DeliverMax only (xrpld DeliverMax.cpp). Keep both:
+    `Amount` (legacy schema, existing queries) gets a copy when it is absent."""
+    if "Amount" not in doc and "DeliverMax" in doc:
+        dm = doc["DeliverMax"]
+        doc["Amount"] = dict(dm) if isinstance(dm, dict) else dm
 
 
 def _require(ledger: Dict[str, Any], key: str, index: int) -> Any:
@@ -111,6 +120,7 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
         if not tx_hash:
             raise MalformedLedger(f"ledger {block_number}: transaction without hash")
 
+        copy_deliver_max(doc)
         for field in INT_FIELDS:
             if doc.get(field) is not None:
                 doc[field] = to_int(doc[field])

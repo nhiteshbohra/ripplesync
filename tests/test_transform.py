@@ -136,3 +136,46 @@ def test_close_time_iso():
                                    (None, None), ({"a": 1}, {"a": 1}), ("", "")])
 def test_to_int(v, exp):
     assert to_int(v) == exp
+
+
+# -- API v2 Payment: DeliverMax replaces Amount (xrpld DeliverMax.cpp) ----------------------
+
+def v2_payment(deliver_max, **extra):
+    tx = make_tx(0)
+    del tx["tx_json"]["Amount"]
+    tx["tx_json"]["DeliverMax"] = deliver_max
+    tx["tx_json"].update(extra)
+    return tx
+
+
+def test_v2_deliver_max_xrp_copied_into_amount():
+    txs, _ = flatten_transactions(1, "LH", 0, [v2_payment("2500000")], NOW)
+    assert txs[0]["Amount"] == 2500000 and txs[0]["DeliverMax"] == 2500000
+
+
+def test_v2_deliver_max_token_copied_into_amount():
+    token = {"currency": "USD", "issuer": "rI", "value": "1.5"}
+    txs, _ = flatten_transactions(1, "LH", 0, [v2_payment(token)], NOW)
+    assert txs[0]["Amount"] == token and txs[0]["DeliverMax"] == token
+    txs[0]["Amount"]["value"] = "changed"  # independent copies, not one shared dict
+    assert txs[0]["DeliverMax"]["value"] == "1.5"
+
+
+def test_existing_amount_not_overwritten_by_deliver_max():
+    tx = make_tx(0)  # Amount "1000000"
+    tx["tx_json"]["DeliverMax"] = "7"
+    txs, _ = flatten_transactions(1, "LH", 0, [tx], NOW)
+    assert txs[0]["Amount"] == 1000000 and txs[0]["DeliverMax"] == 7
+
+
+def test_no_deliver_max_no_amount_added():
+    tx = make_tx(0)
+    tx["tx_json"]["TransactionType"] = "AccountSet"
+    del tx["tx_json"]["Amount"]
+    txs, _ = flatten_transactions(1, "LH", 0, [tx], NOW)
+    assert "Amount" not in txs[0] and "DeliverMax" not in txs[0]
+
+
+def test_v2_deliver_max_non_numeric_kept_as_is():
+    txs, _ = flatten_transactions(1, "LH", 0, [v2_payment("bad")], NOW)
+    assert txs[0]["Amount"] == "bad" and txs[0]["DeliverMax"] == "bad"
