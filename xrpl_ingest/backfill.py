@@ -196,11 +196,18 @@ def _run_pool(cfg: Config, chunks: List[Range], results: List[ChunkResult], t0: 
         try:
             while pending:
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    r = fut.result()
+                broken: Optional[BrokenProcessPool] = None
+                for fut in done:  # collect every finished chunk before reacting to a dead worker
+                    try:
+                        r = fut.result()
+                    except BrokenProcessPool as e:
+                        broken = e
+                        continue
                     results.append(r)
                     _log_chunk(r, t0)
                     stopping = stopping or not r.completed
+                if broken is not None:
+                    raise broken
                 stopping = stopping or stop_signalled()  # SIGTERM to this (parent) process
                 if not stopping:
                     pending |= submit(len(done))

@@ -1,6 +1,8 @@
 import asyncio
 import dataclasses
 import os
+from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 
 import pytest
 from pymongo.errors import AutoReconnect
@@ -304,6 +306,46 @@ def test_pool_worker_death_stops_backfill_and_counts_lost_chunks(cfg, store, mon
     assert summary["chunks_run"] < 8
     assert summary["chunks_incomplete"] == 8 - summary["chunks_run"]
     assert any("worker process died" in m for m in caplog.messages)
+
+
+class InstantPool:
+    """Stands in for ProcessPoolExecutor: futures complete at submit; chunk BAD's worker
+    'dies' (BrokenProcessPool), like the OOM case, in the same batch as finished chunks."""
+    BAD = POOL_LO + 10
+
+    def __init__(self, max_workers, mp_context):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, args):
+        fut = Future()
+        _cfg, chunk = args
+        if chunk[0] == self.BAD:
+            fut.set_exception(BrokenProcessPool("A process in the process pool was terminated"))
+        else:
+            fut.set_result(_ok_chunk(args))
+        return fut
+
+
+def broken_first(fs, return_when):
+    """wait() stand-in returning the whole batch, the broken future first."""
+    return sorted(fs, key=lambda f: f.exception() is None), set()
+
+
+def test_pool_broken_batch_keeps_results_of_chunks_that_finished(cfg, store, monkeypatch):
+    monkeypatch.setattr(backfill, "ProcessPoolExecutor", InstantPool)
+    monkeypatch.setattr(backfill, "wait", broken_first)
+    cfg = dataclasses.replace(cfg, num_processes=4)
+    src = FakeSource(latest=POOL_HI, ranges=f"{POOL_LO}-{POOL_HI}")
+    summary = run_backfill(cfg, POOL_LO, POOL_HI, source=src, store=store)
+    # first window = 4 chunks: 3 finished (and marked done in their workers), 1 broke
+    assert summary["chunks_run"] == 3 and summary["ledgers_ok"] == 30
+    assert summary["chunks_incomplete"] == 8 - 3
 
 
 def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path):
