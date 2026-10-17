@@ -121,7 +121,7 @@ def test_timeout_raises_and_pending_cleaned():
     assert holder["conn"].pending == {}
 
 
-def test_hung_connection_dropped_after_repeated_timeouts_and_reconnects():
+def test_silent_connection_dropped_on_timeout_and_reconnects():
     made = []
 
     async def connect(url, **_):
@@ -135,14 +135,41 @@ def test_hung_connection_dropped_after_repeated_timeouts_and_reconnects():
 
     async def go():
         s = make_source(connect)
-        for _ in range(3):
-            with pytest.raises(RequestTimeout):
-                await s.get_ledger(1)
+        with pytest.raises(RequestTimeout):
+            await s.get_ledger(1)  # nothing at all arrived for request_timeout: hung socket
         res = await s.get_ledger(2)  # reconnects to a healthy socket
         await s.close()
         return res
     assert run(go())["validated"] is True
     assert len(made) == 2 and made[0].closed
+
+
+def test_slow_requests_time_out_alone_while_connection_is_active():
+    """Auditor r06: a few slow ledgers timing out together must not drop a connection that
+    is still delivering other responses (the old 3-consecutive-timeouts rule did)."""
+    def handler(req):
+        if req["command"] == "server_info":
+            return info_reply(req)
+        if req["ledger_index"] < 10:
+            return None  # slow ledgers: never answered in time
+        asyncio.get_running_loop().call_later(0.08, made[0][1].push, default_handler(req))
+        return None
+    connect, made = single(handler)
+
+    async def go():
+        s = make_source(connect, request_timeout=0.3)
+        await s.server_info()
+        slow = [asyncio.create_task(s.get_ledger(i)) for i in (1, 2, 3)]
+        healthy = []
+        for i in range(10, 18):  # traffic keeps flowing past the slow ones' timeout
+            healthy.append(await s.get_ledger(i))
+        results = await asyncio.gather(*slow, return_exceptions=True)
+        await s.close()
+        return results, healthy
+    results, healthy = run(go())
+    assert all(isinstance(r, RequestTimeout) for r in results)
+    assert len(healthy) == 8 and all(h["validated"] for h in healthy)
+    assert len(made) == 1  # never dropped
 
 
 def test_connection_drop_fails_inflight_then_reconnects():

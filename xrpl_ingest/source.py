@@ -5,6 +5,7 @@ import asyncio
 import itertools
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 from urllib.parse import urlsplit
 
@@ -16,7 +17,6 @@ from .fetcher import RetryPolicy
 log = logging.getLogger(__name__)
 
 API_VERSION = 2
-MAX_CONSECUTIVE_TIMEOUTS = 3  # then the connection is presumed hung and dropped
 
 ConnectFn = Callable[..., Awaitable[Any]]
 
@@ -39,7 +39,7 @@ class _Conn:
         self.ws = ws
         self.url = redact_url(url)  # only used in messages; never carries credentials
         self.pending: Dict[int, asyncio.Future] = {}
-        self.timeouts = 0
+        self.last_rx = time.monotonic()  # last message of any kind; silence => hung
         self.closed = False
         self.reader: Optional[asyncio.Task] = None
 
@@ -143,6 +143,7 @@ class WsSource:
         reason = "closed by peer"
         try:
             async for raw in conn.ws:
+                conn.last_rx = time.monotonic()
                 try:
                     msg = json.loads(raw)
                 except ValueError:
@@ -197,10 +198,11 @@ class WsSource:
             msg = await asyncio.wait_for(fut, timeout=self.request_timeout)
         except asyncio.TimeoutError:
             conn.pending.pop(rid, None)
-            conn.timeouts += 1
-            if conn.timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
-                log.warning("%d consecutive timeouts on %s; dropping connection", conn.timeouts, conn.url)
-                await self._drop(conn)
+            silent = time.monotonic() - conn.last_rx
+            if silent >= self.request_timeout:  # nothing at all arrived: the socket is hung
+                log.warning("no message from %s for %.1fs; dropping connection", conn.url, silent)
+                await self._drop(conn, f"connection to {conn.url} dropped: silent for {silent:.1f}s")
+            # else: the connection is alive, only this request is slow; the others keep going
             raise RequestTimeout(f"{command} timed out after {self.request_timeout}s") from None
         except TransientError:
             raise
@@ -212,7 +214,6 @@ class WsSource:
         finally:
             _forget(conn, rid, fut)
 
-        conn.timeouts = 0
         result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
         if msg.get("status") == "error" or "error" in msg or result.get("status") == "error":
             err = msg.get("error") or result.get("error") or "unknown"
