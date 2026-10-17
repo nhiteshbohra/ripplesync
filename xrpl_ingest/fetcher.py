@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+from .constants import MAX_BACKOFF_EXPONENT
 from .errors import is_retryable
 from .transform import parse_ledger_result
 
@@ -21,7 +22,7 @@ class RetryPolicy:
     max_delay: float = 30.0
 
     def delay(self, attempt: int) -> float:
-        return min(self.max_delay, self.base * (2 ** attempt))
+        return min(self.max_delay, self.base * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
 
 
 @dataclass

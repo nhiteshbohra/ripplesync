@@ -8,6 +8,7 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 
 from .config import Config
+from .constants import MAX_BACKOFF_EXPONENT
 from .errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
                      RpcError, TransientError)
 
@@ -73,7 +74,7 @@ class WsSource:
     # -- connection management ------------------------------------------------
 
     def _backoff(self, attempt: int) -> float:
-        return min(self.backoff_max, self.backoff_base * (2 ** attempt))
+        return min(self.backoff_max, self.backoff_base * (2 ** min(attempt, MAX_BACKOFF_EXPONENT)))
 
     async def _get_conn(self) -> _Conn:
         if self._lock is None:

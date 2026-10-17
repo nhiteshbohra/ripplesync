@@ -130,6 +130,12 @@ def test_backoff_delays_grow_and_cap():
     assert [p.delay(i) for i in range(5)] == [1, 2, 4, 5, 5]
 
 
+def test_backoff_delay_for_huge_attempt_is_capped_not_overflow():
+    p = RetryPolicy(attempts=5, base=1.0, max_delay=30.0)
+    assert p.delay(5000) == 30.0
+    assert RetryPolicy(base=1.0, max_delay=float("inf")).delay(5000) < float("inf")
+
+
 def test_sleep_called_between_attempts_only(store):
     delays = []
 

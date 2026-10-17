@@ -13,7 +13,6 @@ from .fetcher import RetryPolicy, Sleep, ingest_ledger
 log = logging.getLogger(__name__)
 
 BIG_GAP = 1000  # ledgers behind before we suggest a backfill
-MAX_STALL_STEP = 16  # caps the backoff exponent so 2**n stays a sane float
 
 
 async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: float,
@@ -64,7 +63,7 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
                 log.error("ledger %d failed and could not be recorded; holding checkpoint at %d",
                           idx, last)
                 await sleep(retry.delay(stalls))
-                stalls = min(stalls + 1, MAX_STALL_STEP)
+                stalls += 1
                 break  # next while-iteration retries from last + 1
             stalls = 0
             if not res.ok:

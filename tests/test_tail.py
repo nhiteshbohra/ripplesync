@@ -57,6 +57,17 @@ def test_node_unreachable_backs_off_then_recovers(store):
     assert len(sleeps) == 2
 
 
+def test_tail_survives_more_than_1024_node_failures(store):
+    store.set_checkpoint(99)
+    src = FakeSource(latest=100)
+    src.latest_errors = [ConnectFailed("down")] * 1100
+    sleeps = []
+    retry = RetryPolicy(attempts=5, base=1.0, max_delay=30.0)
+    last = asyncio.run(tail(src, store, retry, poll_interval=2.0, stop_check=lambda: False,
+                            sleep=lambda d: no_sleep(sleeps.append(d)), max_iterations=1101))
+    assert last == 100 and len(sleeps) == 1100 and sleeps[-1] == 30.0
+
+
 def test_stop_flag_halts_immediately(store):
     store.set_checkpoint(10)
     src = FakeSource(latest=100)

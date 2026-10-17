@@ -63,6 +63,11 @@ def test_request_success_and_api_version():
     assert ledger_req["ledger_index"] == 5
 
 
+def test_reconnect_backoff_for_huge_attempt_is_capped_not_overflow():
+    s = WsSource(["ws://a"], backoff_base=1.0, backoff_max=30.0)
+    assert s._backoff(5000) == 30.0
+
+
 def test_error_response_raises_rpcerror():
     def handler(req):
         if req["command"] == "server_info":
