@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import multiprocessing
+import re
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -214,9 +215,13 @@ def _log_chunk(r: ChunkResult, t0: float) -> None:
              r.chunk[0], r.chunk[1], r.ok, r.failed, r.unrecorded, r.completed, time.time() - t0)
 
 
+_CLOSE_1009 = re.compile(r"\b1009 \(message too big\)")  # websockets close-code text
+
+
 def may_have_killed_neighbours(reason: str) -> bool:
-    """A lost socket (e.g. websockets 1009 message too big) fails every request on it."""
-    return reason.startswith("ConnectionLost") or "1009" in reason or "message too big" in reason
+    """A lost socket (e.g. websockets 1009 message too big) fails every request on it.
+    Matches the close text exactly, not any '1009' (ledger numbers contain it too)."""
+    return reason.startswith("ConnectionLost") or bool(_CLOSE_1009.search(reason))
 
 
 async def _reingest(source: Any, store: Any, indices: List[int], retry: RetryPolicy,

@@ -215,6 +215,11 @@ def test_list_failed_with_reasons(store):
     (SHARED_SOCKET_DEATH, True), ("ConnectionLost: connection dropped", True),
     ("ConnectionClosedError: received 1009 (message too big)", True),
     ("RpcError: lgrNotFound", False), ("RequestTimeout: ledger timed out after 30s", False),
+    ("ConnectionClosedError: sent 1009 (message too big) frame exceeds limit", True),
+    # false positives of the old substring match: ledger numbers containing 1009
+    ("MalformedLedger: ledger 31009 has no ledger_hash", False),
+    ("RpcError: lgrNotFound: ledger 1009 not found", False),
+    ("NotValidated: ledger 10090 is not validated", False),
 ])
 def test_shared_socket_suspects(reason, suspect):
     assert backfill.may_have_killed_neighbours(reason) is suspect
