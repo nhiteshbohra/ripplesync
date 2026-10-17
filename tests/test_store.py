@@ -7,8 +7,10 @@ def bundle(idx, n=2):
 
 
 def test_indexes_created(store):
-    assert "hash_1" in store.txs.index_information()
-    assert "block_number_1" in store.ledgers.index_information()
+    # unique indexes are what make every upsert idempotent; a plain index would allow duplicates
+    for coll, name in [(store.txs, "hash_1"), (store.ledgers, "block_number_1"),
+                       (store.metas, "transaction_hash_1"), (store.failed, "block_number_1")]:
+        assert coll.index_information()[name].get("unique") is True, (coll.name, name)
 
 
 def test_save_is_idempotent_and_replaces(store):

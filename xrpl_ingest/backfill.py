@@ -15,6 +15,7 @@ from pymongo.errors import PyMongoError
 
 from .config import Config, setup_logging
 from .constants import FIRST_LEDGER
+from .errors import IngestError, TransientError
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 from .ledger_ranges import Range, parse_complete_ledgers, plan_chunks
 from .source import WsSource
@@ -95,7 +96,10 @@ def _run_chunk_in_process(args: Tuple[Config, Range]) -> ChunkResult:
 
 async def discover_node(source: Any) -> Tuple[List[Range], int]:
     info = await source.server_info()
-    ranges = parse_complete_ledgers(info.get("complete_ledgers", ""))
+    try:
+        ranges = parse_complete_ledgers(info.get("complete_ledgers", ""))
+    except ValueError as e:  # a node problem, not a bad argument
+        raise IngestError(f"node returned malformed complete_ledgers: {e}") from None
     latest = info.get("validated_ledger", {}).get("seq") or 0
     return ranges, int(latest)
 
@@ -123,6 +127,9 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
                     await source.close()
         node_ranges, latest = asyncio.run(discover())
 
+        if end is None and latest <= 0:
+            raise TransientError("node has no validated ledger yet (still syncing?); "
+                                 "wait, or pass --end")
         end = latest if end is None else end
         if end < start:
             raise ValueError(f"end ({end}) < start ({start}); node latest validated is {latest}")
@@ -215,7 +222,9 @@ async def retry_failed(source: Any, store: Any, retry: RetryPolicy, *, max_round
         it = iter(failed)
 
         async def worker() -> None:
-            for idx in it:
+            # B023 is a false positive: every worker is awaited (gather below) inside this
+            # same round, so `it` is always the current round's iterator.
+            for idx in it:  # noqa: B023
                 if stop_check():
                     return
                 await ingest_ledger(source, store, idx, retry, clear_failure=True, sleep=sleep)

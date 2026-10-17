@@ -7,8 +7,9 @@ from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
 from xrpl_ingest import backfill
-from xrpl_ingest.backfill import ChunkResult, process_chunk, retry_failed, run_backfill
-from xrpl_ingest.errors import RequestTimeout, RpcError
+from xrpl_ingest.backfill import (ChunkResult, discover_node, process_chunk, retry_failed,
+                                  run_backfill)
+from xrpl_ingest.errors import IngestError, RequestTimeout, RpcError
 
 
 def run(coro):
@@ -93,6 +94,35 @@ def test_run_backfill_default_end_is_latest_validated(cfg, store):
     src = FakeSource(latest=lo + 4, ranges=f"{lo}-{lo+100}")
     summary = run_backfill(cfg, lo, None, source=src, store=store, inline=True)
     assert summary["ledgers_ok"] == 5
+
+
+class NoValidatedNode(FakeSource):
+    """Node still syncing: server_info has no validated_ledger at all."""
+
+    async def server_info(self):
+        return {"complete_ledgers": "empty"}
+
+
+def test_discover_node_without_validated_ledger_or_ranges():
+    assert run(discover_node(NoValidatedNode())) == ([], 0)
+
+
+def test_run_backfill_default_end_on_node_without_validated_ledger(cfg, store):
+    with pytest.raises(IngestError, match="no validated ledger"):
+        run_backfill(cfg, 32570, None, source=NoValidatedNode(), store=store, inline=True)
+
+
+def test_run_backfill_node_with_empty_complete_ledgers(cfg, store):
+    src = FakeSource(latest=40000, ranges="empty")
+    summary = run_backfill(cfg, 32570, 32579, source=src, store=store, inline=True)
+    assert summary["chunks_run"] == 0 and summary["unavailable_ranges"] == [(32570, 32579)]
+    assert src.calls == []
+
+
+def test_malformed_complete_ledgers_is_a_clear_node_error(cfg, store):
+    src = FakeSource(latest=40000, ranges="32570-abc")
+    with pytest.raises(IngestError, match="malformed complete_ledgers.*32570-abc"):
+        run_backfill(cfg, 32570, 32579, source=src, store=store, inline=True)
 
 
 def test_run_backfill_rejects_start_below_first_ledger(cfg, store):

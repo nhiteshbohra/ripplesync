@@ -328,7 +328,7 @@ def test_send_on_closed_socket_becomes_connection_lost():
         s = make_source(connect)
         await s.server_info()
         made[0][1].closed = True  # socket dies silently before the reader notices
-        with pytest.raises(TransientError):
+        with pytest.raises(ConnectionLost, match="ledger failed: ConnectionError: closed"):
             await s.get_ledger(1)
         await s.close()
     run(go())

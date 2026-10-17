@@ -107,8 +107,6 @@ class FakeWs:
             await self.close()
             return
         if resp is not None:
-            if isinstance(resp, tuple):  # (delay-callable) unused; keep simple
-                resp = resp[0]
             self.queue.put_nowait(json.dumps(resp))
 
     def push(self, resp):

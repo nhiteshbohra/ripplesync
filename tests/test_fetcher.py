@@ -1,6 +1,5 @@
 import asyncio
 
-import pytest
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
