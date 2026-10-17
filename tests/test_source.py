@@ -33,7 +33,9 @@ def default_handler(req):
 
 
 def make_source(connect_fn, servers=("ws://a", "ws://b"), **kw):
-    kw.setdefault("request_timeout", 0.2)
+    # generous: success paths must not depend on scheduling speed under load; tests
+    # that expect a timeout pass a short request_timeout themselves
+    kw.setdefault("request_timeout", 2.0)
     kw.setdefault("connect_retries", 2)
     return WsSource(servers, connect_fn=connect_fn, sleep=no_sleep, **kw)
 
@@ -109,7 +111,7 @@ def test_timeout_raises_and_pending_cleaned():
     holder = {}
 
     async def go():
-        s = make_source(connect)
+        s = make_source(connect, request_timeout=0.5)  # also bounds the server_info step
         await s.server_info()
         holder["conn"] = s._conn
         try:
@@ -134,7 +136,7 @@ def test_silent_connection_dropped_on_timeout_and_reconnects():
         return ws
 
     async def go():
-        s = make_source(connect)
+        s = make_source(connect, request_timeout=0.5)  # also bounds the server_info step
         with pytest.raises(RequestTimeout):
             await s.get_ledger(1)  # nothing at all arrived for request_timeout: hung socket
         res = await s.get_ledger(2)  # reconnects to a healthy socket
@@ -163,7 +165,7 @@ def test_silence_decision_does_not_depend_on_clock_precision(monkeypatch):
         return made[-1]
 
     async def go():
-        s = make_source(connect)
+        s = make_source(connect, request_timeout=0.5)  # also bounds the server_info step
         with pytest.raises(RequestTimeout):
             await s.get_ledger(1)
         res = await s.get_ledger(2)
@@ -186,18 +188,22 @@ def test_slow_requests_time_out_alone_while_connection_is_active():
     connect, made = single(handler)
 
     async def go():
-        s = make_source(connect, request_timeout=0.3)
+        s = make_source(connect, request_timeout=1.0)
         await s.server_info()
         slow = [asyncio.create_task(s.get_ledger(i)) for i in (1, 2, 3)]
-        healthy = []
-        for i in range(10, 18):  # traffic keeps flowing past the slow ones' timeout
+        healthy, i = [], 10
+        # keep a healthy request in flight until the slow ones have timed out (whatever the
+        # machine speed), then one more: none may be killed by the slow ones' timeouts
+        while not all(t.done() for t in slow):
             healthy.append(await s.get_ledger(i))
+            i += 1
+        healthy.append(await s.get_ledger(i))
         results = await asyncio.gather(*slow, return_exceptions=True)
         await s.close()
         return results, healthy
     results, healthy = run(go())
     assert all(isinstance(r, RequestTimeout) for r in results)
-    assert len(healthy) == 8 and all(h["validated"] for h in healthy)
+    assert len(healthy) >= 2 and all(h["validated"] for h in healthy)
     assert len(made) == 1  # never dropped
 
 
