@@ -13,7 +13,7 @@ from .config import Config, setup_logging
 from .constants import FIRST_LEDGER
 from .errors import ConfigError, IngestError, NetworkMismatch
 from .source import WsSource
-from .stopflag import stop_requested
+from .stopflag import install_stop_signal, stop_requested
 from .store import MongoStore
 from .tail import tail
 
@@ -56,6 +56,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
     setup_logging(cfg.log_level)
+    install_stop_signal()  # SIGTERM = graceful stop, same as current_process=0 (POSIX)
     stop = lambda: stop_requested(cfg.process_status_file)  # noqa: E731
 
     try:

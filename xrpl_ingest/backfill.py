@@ -19,7 +19,7 @@ from .errors import IngestError, TransientError
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 from .ledger_ranges import Range, parse_complete_ledgers, plan_chunks
 from .source import WsSource
-from .stopflag import stop_requested
+from .stopflag import install_stop_signal, stop_requested, stop_signalled
 from .store import MongoStore
 
 log = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ def _run_chunk_in_process(args: Tuple[Config, Range]) -> ChunkResult:
     cfg, chunk = args
     if _store_cache is None:  # first chunk in this process
         setup_logging(cfg.log_level)  # spawn children inherit no logging config
+        install_stop_signal()  # systemd may SIGTERM the whole group: stop the chunk cleanly
         _store_cache = MongoStore.from_config(cfg)
 
     async def go() -> ChunkResult:
@@ -195,6 +196,7 @@ def _run_pool(cfg: Config, chunks: List[Range], results: List[ChunkResult], t0: 
                     results.append(r)
                     _log_chunk(r, t0)
                     stopping = stopping or not r.completed
+                stopping = stopping or stop_signalled()  # SIGTERM to this (parent) process
                 if not stopping:
                     pending |= submit(len(done))
         except BrokenProcessPool as e:
@@ -202,7 +204,9 @@ def _run_pool(cfg: Config, chunks: List[Range], results: List[ChunkResult], t0: 
             log.error("a backfill worker process died (%s); stopping with %d chunks unfinished "
                       "(not marked done; rerun backfill to redo them)", e, lost)
             return lost
-    return 0
+    # after SIGTERM the in-flight chunks may all have completed; the never-started ones
+    # still count as unfinished, so the exit code says "stopped early" like the stop file
+    return len(chunks) - len(results) if stop_signalled() else 0
 
 
 def _log_chunk(r: ChunkResult, t0: float) -> None:

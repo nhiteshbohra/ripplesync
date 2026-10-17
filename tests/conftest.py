@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import sys
 from datetime import datetime, timezone
 
@@ -8,6 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from xrpl_ingest import stopflag  # noqa: E402
 from xrpl_ingest.config import Config  # noqa: E402
 from xrpl_ingest.errors import ConnectionLost  # noqa: E402
 from xrpl_ingest.fetcher import RetryPolicy  # noqa: E402
@@ -19,6 +21,16 @@ FAST_RETRY = RetryPolicy(attempts=3, base=0, max_delay=0)
 
 async def no_sleep(_seconds):
     return None
+
+
+@pytest.fixture(autouse=True)
+def isolated_stop_signal(monkeypatch):
+    """Every test starts un-stopped, and the SIGTERM handler of the pytest process is put
+    back afterwards (cli.main and pool-worker code install one)."""
+    monkeypatch.setattr(stopflag, "_signalled", False)
+    previous = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, previous)
 
 
 @pytest.fixture

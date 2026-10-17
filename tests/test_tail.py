@@ -3,6 +3,7 @@ import asyncio
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
+from xrpl_ingest import stopflag
 from xrpl_ingest.backfill import run_backfill
 from xrpl_ingest.errors import ConnectFailed, RpcError
 from xrpl_ingest.fetcher import RetryPolicy
@@ -114,6 +115,21 @@ def test_tail_survives_more_than_1024_node_failures(store):
     last = asyncio.run(tail(src, store, retry, poll_interval=2.0, stop_check=lambda: False,
                             sleep=lambda d: no_sleep(sleeps.append(d)), max_iterations=1101))
     assert last == 100 and len(sleeps) == 1100 and sleeps[-1] == 30.0
+
+
+def test_sigterm_stops_tail_like_the_stop_file(store, tmp_path):
+    store.set_checkpoint(10)
+
+    class SignalAfterTwo(FakeSource):
+        async def get_ledger(self, index):
+            if len(self.calls) == 2:
+                stopflag.request_stop(15, None)
+            return await super().get_ledger(index)
+
+    src = SignalAfterTwo(latest=100)
+    path = str(tmp_path / "missing.txt")
+    last = run_tail(src, store, stop=lambda: stopflag.stop_requested(path), iterations=None)
+    assert last == 13 and store.get_checkpoint() == 13  # in-flight ledger finished, then stop
 
 
 def test_stop_flag_halts_immediately(store):

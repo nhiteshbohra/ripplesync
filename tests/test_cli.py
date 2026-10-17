@@ -128,6 +128,13 @@ def test_status_ok(cli_main, monkeypatch, capsys):
     assert "latest validated: 100" in out and "database: {" in out
 
 
+def test_main_installs_sigterm_handler(cli_main, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "install_stop_signal", lambda: calls.append(1) or True)
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg: FakeSource(latest=100))
+    assert cli_main(["status"]) == 0 and calls == [1]
+
+
 def test_main_help_lists_exit_codes():
     text = build_parser().format_help()
     assert "4 = node or MongoDB" in text and "130" in text

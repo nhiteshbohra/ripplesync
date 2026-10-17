@@ -8,7 +8,7 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 from conftest import FAST_RETRY, FakeSource, FakeWs, make_result, no_sleep
-from xrpl_ingest import backfill
+from xrpl_ingest import backfill, stopflag
 from xrpl_ingest.backfill import (ChunkResult, discover_node, process_chunk, retry_failed,
                                   run_backfill)
 from xrpl_ingest.errors import IngestError, RequestTimeout, RpcError
@@ -309,6 +309,43 @@ def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path):
     assert summary["chunks_run"] == 2
     assert summary["chunks_incomplete"] == summary["chunks_run"]
     assert store.done_chunks(POOL_LO, POOL_HI) == set()
+
+
+def test_pool_parent_stops_submitting_after_sigterm(cfg, store, monkeypatch):
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
+    monkeypatch.setattr(backfill, "stop_signalled", lambda: True)  # SIGTERM reached the parent
+    summary = pool_run(cfg, store)
+    assert summary["chunks_run"] == 2  # the in-flight ones finish, nothing new starts
+    assert summary["chunks_incomplete"] == 6  # never started: counted, so the exit code is 1
+
+
+def test_sigterm_mid_chunk_stops_inline_backfill_unmarked(cfg, store):
+    lo, hi = 32570, 32570 + 19
+
+    class SignalAfterThree(FakeSource):
+        async def get_ledger(self, index):
+            if len(self.calls) == 3:
+                stopflag.request_stop(15, None)
+            return await super().get_ledger(index)
+
+    src = SignalAfterThree(latest=hi, ranges=f"{lo}-{hi}")
+    summary = run_backfill(cfg, lo, hi, source=src, store=store, inline=True)
+    assert summary["chunks_incomplete"] == 1 and summary["chunks_run"] == 1
+    assert store.done_chunks(lo, hi) == set() and len(src.calls) < 10
+
+
+def test_pool_worker_installs_sigterm_handler_once(cfg, store, tmp_path, monkeypatch):
+    flag = tmp_path / "s.txt"
+    flag.write_text("current_process=0")
+    cfg = dataclasses.replace(cfg, process_status_file=str(flag))
+    calls = []
+    monkeypatch.setattr(backfill, "install_stop_signal", lambda: calls.append(1) or True)
+    monkeypatch.setattr(backfill, "setup_logging", lambda level: None)
+    monkeypatch.setattr(backfill, "_store_cache", None)
+    monkeypatch.setattr(backfill.MongoStore, "from_config", lambda _cfg: store)
+    for chunk in [(10, 19), (20, 29)]:
+        backfill._run_chunk_in_process((cfg, chunk))
+    assert calls == [1]
 
 
 def test_pool_worker_configures_logging_once_per_process(cfg, store, tmp_path, monkeypatch):

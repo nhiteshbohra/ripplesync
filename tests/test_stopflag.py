@@ -1,6 +1,32 @@
+import os
+import signal
+import sys
+
 import pytest
 
+from xrpl_ingest import stopflag
 from xrpl_ingest.stopflag import stop_requested
+
+
+# conftest's autouse fixture resets the stop flag and restores the SIGTERM handler.
+
+def test_sigterm_handler_acts_like_stop_file(tmp_path):
+    missing = str(tmp_path / "nope.txt")
+    assert stop_requested(missing) is False
+    stopflag.request_stop(signal.SIGTERM, None)  # what the installed handler runs
+    assert stop_requested(missing) is True and stopflag.stop_signalled() is True
+
+
+def test_install_stop_signal_registers_sigterm():
+    assert stopflag.install_stop_signal() is True
+    assert signal.getsignal(signal.SIGTERM) is stopflag.request_stop
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows os.kill(SIGTERM) terminates, no handler")
+def test_real_sigterm_sets_stop(tmp_path):
+    stopflag.install_stop_signal()
+    os.kill(os.getpid(), signal.SIGTERM)
+    assert stop_requested(str(tmp_path / "nope.txt")) is True
 
 
 def test_missing_file_means_run(tmp_path):
