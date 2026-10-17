@@ -1,4 +1,5 @@
 from conftest import NOW, make_result
+from xrpl_ingest.store import LAST_LEDGER_ID
 from xrpl_ingest.transform import parse_ledger_result
 
 
@@ -31,6 +32,13 @@ def test_checkpoint_roundtrip(store):
     store.set_checkpoint(50)
     store.set_checkpoint(51)
     assert store.get_checkpoint() == 51
+
+
+def test_checkpoint_never_moves_back(store):
+    store.set_checkpoint(100)
+    store.set_checkpoint(50)  # e.g. a second, older tail process
+    assert store.get_checkpoint() == 100
+    assert store.meta.find_one({"_id": LAST_LEDGER_ID})["updated_at"] is not None
 
 
 def test_chunk_progress(store):

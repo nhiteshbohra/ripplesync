@@ -71,8 +71,10 @@ class MongoStore:
         return int(doc.get("index", 0)) if doc else 0
 
     def set_checkpoint(self, index: int) -> None:
+        """Never moves back ($max), e.g. if an older tail process is still running."""
         self.meta.update_one({"_id": LAST_LEDGER_ID},
-                             {"$set": {"index": index, "updated_at": _now()}}, upsert=True)
+                             {"$max": {"index": index}, "$set": {"updated_at": _now()}},
+                             upsert=True)
 
     # -- backfill chunk progress -------------------------------------------------
 

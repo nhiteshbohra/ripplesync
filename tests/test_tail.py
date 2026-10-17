@@ -5,6 +5,7 @@ from pymongo.errors import AutoReconnect
 from conftest import FAST_RETRY, FakeSource, no_sleep
 from xrpl_ingest.errors import ConnectFailed, RpcError
 from xrpl_ingest.fetcher import RetryPolicy
+from xrpl_ingest.store import LAST_LEDGER_ID
 from xrpl_ingest.tail import tail
 
 
@@ -104,8 +105,11 @@ def test_reprocessing_after_lost_checkpoint_is_idempotent(store):
     src = FakeSource(latest=100)
     store.set_checkpoint(98)
     run_tail(src, store, iterations=1)
-    store.set_checkpoint(98)  # simulate lost checkpoint write
-    run_tail(FakeSource(latest=100), store, iterations=1)
+    # simulate a lost checkpoint write (set_checkpoint itself never moves back)
+    store.meta.update_one({"_id": LAST_LEDGER_ID}, {"$set": {"index": 98}})
+    src2 = FakeSource(latest=100)
+    run_tail(src2, store, iterations=1)
+    assert src2.calls == [99, 100]
     assert store.ledgers.count_documents({}) == 2
     assert store.txs.count_documents({}) == 4
 
