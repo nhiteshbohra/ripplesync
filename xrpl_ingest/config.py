@@ -6,7 +6,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 from .errors import ConfigError
@@ -22,7 +22,7 @@ def setup_logging(level: str) -> None:
 
 @dataclass(frozen=True)
 class Config:
-    mongo_uri: str
+    mongo_uri: str = field(repr=False)  # may hold credentials; keep it out of logs/tracebacks
     db_name: str = "xrpl_data_collection"
 
     ledger_collection: str = "block_number"

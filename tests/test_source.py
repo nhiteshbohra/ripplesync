@@ -10,7 +10,7 @@ from conftest import FakeWs, no_sleep
 from xrpl_ingest.errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
                                 RpcError, TransientError, is_retryable)
 from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger
-from xrpl_ingest.source import WsSource
+from xrpl_ingest.source import WsSource, redact_url
 
 
 def ok(req, result):
@@ -255,6 +255,58 @@ def test_send_failure_after_reader_failed_future_leaves_nothing_unretrieved():
         gc.collect()  # an unretrieved future reports itself when collected
     run(go())
     assert not [m for m in loop_errors if "never retrieved" in m]
+
+
+@pytest.mark.parametrize("url,shown", [
+    ("ws://user:secret@node:6006/path", "ws://node:6006/path"),
+    ("wss://token@node", "wss://node"),
+    ("ws://127.0.0.1:6006", "ws://127.0.0.1:6006"),
+])
+def test_redact_url_strips_userinfo(url, shown):
+    assert redact_url(url) == shown
+
+
+def test_server_credentials_never_logged_or_stored(caplog):
+    attempts = []
+
+    def end_reader(ws):
+        ws.fail(ConnectionClosedError(None, Close(1011, "gone")))
+
+    dies = reader_dies_on_ledger(end_reader)
+
+    async def connect(url, **kw):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise OSError("refused")  # exercise the connect-failure log line too
+        return await dies(url, **kw)
+
+    async def go():
+        s = make_source(connect, servers=("ws://user:secret@a",), request_timeout=5)
+        with pytest.raises(ConnectionLost) as e:
+            await s.get_ledger(1)
+        await s.close()
+        return str(e.value)
+    with caplog.at_level("DEBUG", logger="xrpl_ingest.source"):
+        msg = run(go())
+    assert attempts[0] == "ws://user:secret@a"  # the real URL is still used to connect
+    assert "ws://a" in msg and "secret" not in msg
+    assert caplog.messages and not [m for m in caplog.messages if "secret" in m]
+
+
+def test_unhashable_response_id_ignored_not_fatal():
+    def handler(req):
+        if req["command"] == "ledger":
+            made[0][1].push({"id": [req["id"]], "status": "success", "result": {}})
+            made[0][1].push({"id": True, "status": "success", "result": {}})  # bool is not an id
+        return default_handler(req)
+    connect, made = single(handler)
+
+    async def go():
+        s = make_source(connect)
+        res = await s.get_ledger(1)
+        await s.close()
+        return res
+    assert run(go())["validated"] is True
 
 
 def test_own_close_does_not_log_warning(caplog):

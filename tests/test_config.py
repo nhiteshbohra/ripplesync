@@ -80,6 +80,12 @@ def test_setup_logging_uses_shared_format_and_level(monkeypatch):
     assert "%(levelname)s %(name)s" in LOG_FORMAT
 
 
+def test_repr_hides_mongo_uri():
+    c = Config.from_env({"MONGO_URI": "mongodb://admin:hunter2@db.example:27017"})
+    assert "hunter2" not in repr(c) and "db.example" not in repr(c)
+    assert c.mongo_uri.endswith("@db.example:27017")
+
+
 def test_network_check_can_be_disabled():
     assert Config.from_env({**BASE, "EXPECTED_NETWORK_ID": "none"}).expected_network_id is None
     assert Config.from_env({**BASE, "EXPECTED_NETWORK_ID": "1"}).expected_network_id == 1

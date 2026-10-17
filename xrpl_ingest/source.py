@@ -6,6 +6,7 @@ import itertools
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
+from urllib.parse import urlsplit
 
 from .config import Config
 from .constants import MAX_BACKOFF_EXPONENT
@@ -20,6 +21,12 @@ MAX_CONSECUTIVE_TIMEOUTS = 3  # then the connection is presumed hung and dropped
 ConnectFn = Callable[..., Awaitable[Any]]
 
 
+def redact_url(url: str) -> str:
+    """ws://user:pass@host:6006 -> ws://host:6006, for logs and stored failure reasons."""
+    parts = urlsplit(url)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2]).geturl()
+
+
 async def _default_connect(url: str, *, timeout: float, max_size: int):
     from websockets.asyncio.client import connect  # lazy: tests inject a fake
     return await connect(url, open_timeout=timeout, max_size=max_size)
@@ -30,7 +37,7 @@ class _Conn:
 
     def __init__(self, ws: Any, url: str):
         self.ws = ws
-        self.url = url
+        self.url = redact_url(url)  # only used in messages; never carries credentials
         self.pending: Dict[int, asyncio.Future] = {}
         self.timeouts = 0
         self.closed = False
@@ -107,18 +114,18 @@ class WsSource:
                                                 max_size=self.max_message_bytes)
                     conn = self._start(ws, url)
                     await self._check_network(conn)
-                    log.info("connected to %s", url)
+                    log.info("connected to %s", redact_url(url))
                     return conn
                 except NetworkMismatch as e:
                     last = e
                     mismatched += 1
-                    log.error("%s: %s", url, e)
+                    log.error("%s: %s", redact_url(url), e)
                     await self._drop(conn)
                     break  # wrong network will not fix itself; next server
                 except Exception as e:  # noqa: BLE001 - any connect failure means try again
                     last = e
                     log.warning("connect to %s failed (attempt %d/%d): %s",
-                                url, attempt + 1, self.connect_retries, e)
+                                redact_url(url), attempt + 1, self.connect_retries, e)
                     await self._drop(conn)
                     if attempt < self.connect_retries - 1:
                         await self._sleep(self._backoff(attempt))
@@ -139,7 +146,9 @@ class WsSource:
                     msg = json.loads(raw)
                 except ValueError:
                     continue
-                fut = conn.pending.pop(msg.get("id"), None) if isinstance(msg, dict) else None
+                rid = msg.get("id") if isinstance(msg, dict) else None
+                # only our own int ids: an unhashable id (list/dict) would kill the reader
+                fut = conn.pending.pop(rid, None) if type(rid) is int else None
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
         except Exception as e:  # noqa: BLE001 - e.g. websockets ConnectionClosedError
