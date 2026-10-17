@@ -206,6 +206,23 @@ def test_peer_close_reason_reaches_pending_request_and_log(caplog):
     assert any("ws://a" in m and "closed by peer" in m for m in caplog.messages)
 
 
+def test_send_failure_reason_reaches_other_pending_requests():
+    connect, made = single(lambda req: None if req["command"] == "ledger" else default_handler(req))
+
+    async def go():
+        s = make_source(connect, request_timeout=5)
+        await s.server_info()
+        inflight = asyncio.create_task(s.get_ledger(1))  # never answered
+        await asyncio.sleep(0)
+        made[0][1].closed = True  # socket dies; the next send raises ConnectionError("closed")
+        with pytest.raises(ConnectionLost):
+            await s.get_ledger(2)
+        with pytest.raises(ConnectionLost, match="ConnectionError: closed"):
+            await inflight
+        await s.close()
+    run(go())
+
+
 def test_own_close_does_not_log_warning(caplog):
     connect, _ = single()
 

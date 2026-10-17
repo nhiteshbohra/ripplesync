@@ -139,11 +139,11 @@ class WsSource:
             conn.closed = True
             conn.fail_pending(ConnectionLost(f"connection to {conn.url} closed: {reason}"))
 
-    async def _drop(self, conn: Optional[_Conn]) -> None:
+    async def _drop(self, conn: Optional[_Conn], reason: str = "connection dropped") -> None:
         if conn is None:
             return
         conn.closed = True
-        conn.fail_pending(ConnectionLost("connection dropped"))
+        conn.fail_pending(ConnectionLost(reason))
         try:
             await conn.ws.close()
         except Exception:  # noqa: BLE001
@@ -185,8 +185,9 @@ class WsSource:
             raise
         except Exception as e:  # noqa: BLE001 - send on a closed socket etc.
             conn.pending.pop(rid, None)
-            await self._drop(conn)
-            raise ConnectionLost(f"{command} failed: {e}") from e
+            reason = f"{type(e).__name__}: {e}"  # e.g. websockets 1009 message too big
+            await self._drop(conn, f"connection to {conn.url} dropped: {reason}")
+            raise ConnectionLost(f"{command} failed: {reason}") from e
 
         conn.timeouts = 0
         result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
