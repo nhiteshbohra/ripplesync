@@ -5,8 +5,11 @@ import asyncio
 import logging
 import multiprocessing
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from itertools import islice
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 from pymongo.errors import PyMongoError
 
@@ -129,6 +132,7 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
         log.info("backfill %d-%d: %d chunks to run (%d already done)", start, end, len(chunks), len(done))
 
         results: List[ChunkResult] = []
+        lost = 0  # chunks whose worker process died; never ran to completion
         if inline:
             async def run_all():
                 for c in chunks:
@@ -141,15 +145,12 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
                         break
             asyncio.run(run_all())
         else:
-            ctx = multiprocessing.get_context("spawn")
-            with ctx.Pool(cfg.num_processes) as pool:
-                for r in pool.imap_unordered(_run_chunk_in_process, [(cfg, c) for c in chunks]):
-                    results.append(r)
-                    _log_chunk(r, t0)
+            lost = _run_pool(cfg, chunks, results, t0)
 
         summary = {
             "chunks_run": len(results),
-            "chunks_incomplete": sum(1 for r in results if not r.completed),
+            "chunks_incomplete": sum(1 for r in results if not r.completed) + lost,
+            "chunks_unmarked": sum(1 for r in results if r.unrecorded),
             "ledgers_ok": sum(r.ok for r in results),
             "ledgers_failed": sum(r.failed for r in results),
             "unavailable_ranges": unavailable,
@@ -162,9 +163,43 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
             store.close()
 
 
+def _run_pool(cfg: Config, chunks: List[Range], results: List[ChunkResult], t0: float) -> int:
+    """Run chunks in a spawn process pool, appending to `results`. Returns chunks lost.
+
+    At most one chunk per process is in flight, so after a stopped chunk (stop flag) no
+    new chunk is started. A worker that dies (OOM kill, os._exit) breaks the pool: we
+    stop, and every chunk without a result is lost; none of those were marked done, so
+    a rerun redoes them.
+    """
+    todo = iter(chunks)
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=cfg.num_processes, mp_context=ctx) as pool:
+        def submit(n: int) -> Set[Future]:
+            return {pool.submit(_run_chunk_in_process, (cfg, c)) for c in islice(todo, n)}
+
+        pending = submit(cfg.num_processes)
+        stopping = False
+        try:
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    r = fut.result()
+                    results.append(r)
+                    _log_chunk(r, t0)
+                    stopping = stopping or not r.completed
+                if not stopping:
+                    pending |= submit(len(done))
+        except BrokenProcessPool as e:
+            lost = len(chunks) - len(results)
+            log.error("a backfill worker process died (%s); stopping with %d chunks unfinished "
+                      "(not marked done; rerun backfill to redo them)", e, lost)
+            return lost
+    return 0
+
+
 def _log_chunk(r: ChunkResult, t0: float) -> None:
-    log.info("chunk %d-%d: ok=%d failed=%d completed=%s (elapsed %.0fs)",
-             r.chunk[0], r.chunk[1], r.ok, r.failed, r.completed, time.time() - t0)
+    log.info("chunk %d-%d: ok=%d failed=%d unrecorded=%d completed=%s (elapsed %.0fs)",
+             r.chunk[0], r.chunk[1], r.ok, r.failed, r.unrecorded, r.completed, time.time() - t0)
 
 
 async def retry_failed(source: Any, store: Any, retry: RetryPolicy, *, max_rounds: int = 5,

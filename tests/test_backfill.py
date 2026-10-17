@@ -1,11 +1,13 @@
 import asyncio
 import dataclasses
+import os
 
 import pytest
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
-from xrpl_ingest.backfill import process_chunk, retry_failed, run_backfill
+from xrpl_ingest import backfill
+from xrpl_ingest.backfill import ChunkResult, process_chunk, retry_failed, run_backfill
 from xrpl_ingest.errors import RequestTimeout, RpcError
 
 
@@ -150,6 +152,66 @@ def test_chunk_with_unrecorded_failure_is_not_marked_done(store, monkeypatch):
     r = chunk_run(FakeSource({13: [RpcError("lgrNotFound")]}), store, (10, 19))
     assert (r.ok, r.failed, r.unrecorded) == (9, 1, 1)
     assert store.done_chunks(0, 100) == set()  # next backfill redoes the chunk
+
+
+def test_summary_and_chunk_log_count_unmarked_chunks(cfg, store, monkeypatch, caplog):
+    def boom(*a):
+        raise AutoReconnect("down")
+    monkeypatch.setattr(store, "record_failure", boom)
+    lo, hi = 32570, 32570 + 19
+    src = FakeSource({lo + 3: [RpcError("lgrNotFound")]}, latest=hi, ranges=f"{lo}-{hi}")
+    with caplog.at_level("INFO", logger="xrpl_ingest.backfill"):
+        summary = run_backfill(cfg, lo, hi, source=src, store=store, inline=True)
+    assert summary["chunks_unmarked"] == 1 and summary["chunks_run"] == 2
+    assert any("chunk 32570-32579" in m and "unrecorded=1" in m for m in caplog.messages)
+
+
+# -- spawn process-pool path. Worker functions must be module-level so they pickle. --------
+
+POOL_LO, POOL_HI = 32570, 32570 + 79  # 8 chunks of 10
+
+
+def _ok_chunk(args):
+    _cfg, chunk = args
+    return ChunkResult(chunk, ok=chunk[1] - chunk[0] + 1)
+
+
+def _die_on_third_chunk(args):
+    if args[1][0] == POOL_LO + 20:
+        os._exit(137)  # like an OOM kill: no exception, the process just vanishes
+    return _ok_chunk(args)
+
+
+def pool_run(cfg, store, **cfg_changes):
+    cfg = dataclasses.replace(cfg, num_processes=2, **cfg_changes)
+    src = FakeSource(latest=POOL_HI, ranges=f"{POOL_LO}-{POOL_HI}")
+    return run_backfill(cfg, POOL_LO, POOL_HI, source=src, store=store)
+
+
+def test_pool_runs_every_chunk(cfg, store, monkeypatch):
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
+    summary = pool_run(cfg, store)
+    assert summary["chunks_run"] == 8 and summary["chunks_incomplete"] == 0
+    assert summary["ledgers_ok"] == 80
+
+
+def test_pool_worker_death_stops_backfill_and_counts_lost_chunks(cfg, store, monkeypatch, caplog):
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _die_on_third_chunk)
+    with caplog.at_level("ERROR", logger="xrpl_ingest.backfill"):
+        summary = pool_run(cfg, store)  # old imap_unordered code hung here forever
+    assert summary["chunks_run"] < 8
+    assert summary["chunks_incomplete"] == 8 - summary["chunks_run"]
+    assert any("worker process died" in m for m in caplog.messages)
+
+
+def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path):
+    flag = tmp_path / "s.txt"
+    flag.write_text("current_process=0")
+    summary = pool_run(cfg, store, process_status_file=str(flag))
+    # only the chunk already handed to each of the 2 workers runs; old code ran all 8
+    assert summary["chunks_run"] == 2
+    assert summary["chunks_incomplete"] == summary["chunks_run"]
+    assert store.done_chunks(POOL_LO, POOL_HI) == set()
 
 
 def test_mark_chunk_done_error_does_not_raise_and_leaves_chunk_unmarked(store, monkeypatch):
