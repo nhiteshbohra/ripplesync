@@ -323,6 +323,8 @@ else
   # ExecStart path is quoted because REPO_DIR may contain spaces (systemd.syntax "Quoting");
   # WorkingDirectory= takes one path, spaces allowed unquoted. Neither verified on a real systemd yet.
   # Restart=on-failure: tail exits 0 on the process_status.txt stop flag and must stay stopped.
+  # RestartPreventExitStatus=2: exit 2 = config/usage error (incl. wrong network); retrying won't help.
+  # TimeoutStopSec=120: SIGTERM is a graceful stop that may wait out one connect cycle.
   $SUDO tee /etc/systemd/system/xrpl-tail.service >/dev/null <<UNIT
 [Unit]
 Description=XRPL ledger live tail into MongoDB
@@ -335,6 +337,8 @@ WorkingDirectory=$REPO_DIR
 ExecStart="$REPO_DIR/.venv/bin/python" -m xrpl_ingest tail
 Restart=on-failure
 RestartSec=10
+RestartPreventExitStatus=2
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target
