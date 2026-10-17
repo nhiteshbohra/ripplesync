@@ -34,6 +34,13 @@ def test_checkpoint_roundtrip(store):
     assert store.get_checkpoint() == 51
 
 
+def test_highest_ledger(store):
+    assert store.highest_ledger() == 0
+    for idx in (7, 30, 12):
+        store.save_ledger_bundle(*bundle(idx))
+    assert store.highest_ledger() == 30
+
+
 def test_checkpoint_never_moves_back(store):
     store.set_checkpoint(100)
     store.set_checkpoint(50)  # e.g. a second, older tail process

@@ -2,11 +2,13 @@ import asyncio
 
 from pymongo.errors import AutoReconnect
 
-from conftest import FAST_RETRY, FakeSource, no_sleep
+from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
+from xrpl_ingest.backfill import run_backfill
 from xrpl_ingest.errors import ConnectFailed, RpcError
 from xrpl_ingest.fetcher import RetryPolicy
 from xrpl_ingest.store import LAST_LEDGER_ID
-from xrpl_ingest.tail import tail
+from xrpl_ingest.tail import BIG_GAP, tail
+from xrpl_ingest.transform import parse_ledger_result
 
 
 def run_tail(src, store, iterations=3, stop=lambda: False, sleeps=None):
@@ -18,11 +20,56 @@ def run_tail(src, store, iterations=3, stop=lambda: False, sleeps=None):
                             sleep=sleep, max_iterations=iterations))
 
 
-def test_first_run_starts_at_current_ledger(store):
+def test_first_run_on_empty_db_starts_at_current_ledger(store):
     src = FakeSource(latest=500)
     assert run_tail(src, store, iterations=1) == 500
     assert src.calls == [500]
     assert store.get_checkpoint() == 500
+
+
+def store_ledgers(store, indices):
+    for idx in indices:
+        store.save_ledger_bundle(*parse_ledger_result(idx, make_result(idx), NOW))
+
+
+def test_no_checkpoint_resumes_after_highest_stored_ledger(store, caplog):
+    store_ledgers(store, [90, 100])  # e.g. left by a backfill
+    src = FakeSource(latest=103)
+    with caplog.at_level("INFO", logger="xrpl_ingest.tail"):
+        assert run_tail(src, store, iterations=1) == 103
+    assert src.calls == [101, 102, 103]
+    assert any("highest stored ledger 100" in m for m in caplog.messages)
+
+
+def test_checkpoint_wins_over_highest_stored_ledger(store):
+    store_ledgers(store, [100])
+    store.set_checkpoint(98)
+    src = FakeSource(latest=100)
+    run_tail(src, store, iterations=1)
+    assert src.calls == [99, 100]
+
+
+def test_backfill_then_tail_handoff_leaves_no_gap(cfg, store):
+    lo, hi = 32570, 32599
+    run_backfill(cfg, lo, hi, source=FakeSource(latest=hi, ranges=f"{lo}-{hi}"), store=store,
+                 inline=True)
+    src = FakeSource(latest=hi + 5)
+    assert run_tail(src, store, iterations=1) == hi + 5
+    assert src.calls == list(range(hi + 1, hi + 6))
+    assert store.find_gaps(lo, hi + 5) == []
+
+
+def test_resume_far_behind_still_suggests_backfill(store, caplog):
+    store_ledgers(store, [100])
+    n = {"c": 0}
+
+    def stop():
+        n["c"] += 1
+        return n["c"] > 3  # loop check + 2 ledgers
+
+    with caplog.at_level("WARNING", logger="xrpl_ingest.tail"):
+        run_tail(FakeSource(latest=100 + BIG_GAP + 5), store, stop=stop)
+    assert any("consider `backfill`" in m for m in caplog.messages)
 
 
 def test_resumes_from_checkpoint_and_catches_up(store):

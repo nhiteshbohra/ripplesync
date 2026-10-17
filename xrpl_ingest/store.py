@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Set, Tuple
 
-from pymongo import ASCENDING, MongoClient, ReplaceOne
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne
 
 from .config import Config
 
@@ -63,6 +63,11 @@ class MongoStore:
                 [ReplaceOne({"transaction_hash": d["transaction_hash"]}, d, upsert=True)
                  for d in meta_docs], ordered=False)
         self.ledgers.replace_one({"block_number": ledger_doc["block_number"]}, ledger_doc, upsert=True)
+
+    def highest_ledger(self) -> int:
+        """Highest stored block_number (0 if none); uses the unique block_number index."""
+        doc = self.ledgers.find_one({}, {"block_number": 1}, sort=[("block_number", DESCENDING)])
+        return int(doc["block_number"]) if doc else 0
 
     # -- live-tail checkpoint ----------------------------------------------------
 

@@ -24,8 +24,15 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
     still advances, so one bad ledger cannot stall the tail; `retry-failed` picks it up later.
     If the failure cannot be recorded either (Mongo down), the checkpoint stays put and the
     same ledger is retried after a backoff, so nothing is skipped silently.
+
+    Without a checkpoint, tail continues after the highest stored ledger (e.g. where a
+    backfill ended); on an empty database it starts at the node's current ledger.
     """
     last = await asyncio.to_thread(store.get_checkpoint)
+    if last == 0:
+        last = await asyncio.to_thread(store.highest_ledger)
+        if last:
+            log.info("no checkpoint; resuming after highest stored ledger %d", last)
     iterations = 0
     node_failures = 0
     stalls = 0
@@ -45,8 +52,8 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             continue
 
         if last == 0:
-            last = latest - 1  # first run: start at the current ledger
-            log.info("no checkpoint; starting at ledger %d", latest)
+            last = latest - 1  # first run on an empty database: start at the current ledger
+            log.info("no checkpoint and no stored ledgers; starting at ledger %d", latest)
 
         if latest <= last:
             await sleep(poll_interval)
