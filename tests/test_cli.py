@@ -1,10 +1,12 @@
+import os
+
 import pytest
 from pymongo.errors import InvalidURI, ServerSelectionTimeoutError
 
 from conftest import FakeSource
 from xrpl_ingest import cli
 from xrpl_ingest.cli import _verify, backfill_exit_code, build_parser
-from xrpl_ingest.errors import ConnectFailed, NetworkMismatch
+from xrpl_ingest.errors import ConfigError, ConnectFailed, NetworkMismatch
 
 CLEAN = {"ledgers_failed": 0, "chunks_incomplete": 0, "unavailable_ranges": []}
 
@@ -29,9 +31,36 @@ def test_backfill_help_documents_exit_codes():
 # -- main(): error handling and exit codes. .env is never loaded: load_dotenv is a no-op and
 # Config.from_env returns the test config. -------------------------------------------------
 
+PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__)))
+
+
 @pytest.fixture
-def cli_main(monkeypatch, cfg, store):
+def env_lookups(monkeypatch, tmp_path):
+    """Record what main() asks dotenv to load; never load anything. cwd = tmp_path."""
     import dotenv
+    loaded = []
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda path=None, **k: loaded.append(path) or False)
+    monkeypatch.setattr(cli.Config, "from_env", staticmethod(raising(ConfigError("stop here"))))
+    monkeypatch.chdir(tmp_path)
+    return loaded
+
+
+def test_env_file_is_taken_from_cwd(env_lookups, tmp_path):
+    (tmp_path / ".env").write_text("MONGO_URI=mongodb://from-cwd\n")
+    assert cli.main(["status"]) == 2
+    assert env_lookups == [str(tmp_path / ".env")]
+
+
+def test_env_lookup_does_not_fall_back_to_package_dir(env_lookups):
+    assert cli.main(["status"]) == 2
+    assert len(env_lookups) == 1 and isinstance(env_lookups[0], str)  # cwd lookup was used
+    assert not env_lookups[0].startswith(PACKAGE_ROOT)
+
+
+@pytest.fixture
+def cli_main(monkeypatch, cfg, store, tmp_path):
+    import dotenv
+    monkeypatch.chdir(tmp_path)  # .env lookup starts here, far from the repo
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr(cli.Config, "from_env", staticmethod(lambda env=None: cfg))
     monkeypatch.setattr(cli, "setup_logging", lambda level: None)

@@ -49,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
+        from dotenv import find_dotenv, load_dotenv
+        load_dotenv(find_dotenv(usecwd=True))  # .env of the directory we run in, not the package's
         cfg = Config.from_env()
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
