@@ -16,6 +16,7 @@ from .fetcher import RetryPolicy
 log = logging.getLogger(__name__)
 
 API_VERSION = 2
+_warned_no_network_id = False  # "network_id not reported" is logged once per process
 
 ConnectFn = Callable[..., Awaitable[Any]]
 
@@ -181,6 +182,11 @@ class WsSource:
             return
         info = (await self._request_on(conn, "server_info")).get("info", {})
         reported = info.get("network_id")
+        global _warned_no_network_id
+        if reported is None and not _warned_no_network_id:
+            _warned_no_network_id = True  # once per process: backfill opens a source per chunk
+            log.warning("%s: network_id not reported; network guard cannot verify mainnet",
+                        conn.url)
         if reported is not None and reported != self.expected_network_id:
             raise NetworkMismatch(
                 f"network_id {reported} != expected {self.expected_network_id}")

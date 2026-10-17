@@ -531,6 +531,27 @@ def test_missing_network_id_accepted_as_mainnet():
     run(go())
 
 
+def test_missing_network_id_warned_once_per_process(caplog, monkeypatch):
+    from xrpl_ingest import source as source_mod
+    monkeypatch.setattr(source_mod, "_warned_no_network_id", False)
+
+    async def connect(url, **_):
+        return FakeWs(lambda req: info_reply(req, network_id=None))
+
+    async def go():
+        s = make_source(connect)
+        await s.server_info()
+        await s._drop(s._conn)  # reconnect: the check runs again
+        await s.server_info()
+        await s.close()
+        other = make_source(connect)  # backfill opens a new source per chunk
+        await other.server_info()
+        await other.close()
+    with caplog.at_level("WARNING", logger="xrpl_ingest.source"):
+        run(go())
+    assert len([m for m in caplog.messages if "network_id not reported" in m]) == 1
+
+
 def test_network_check_disabled():
     async def connect(url, **_):
         return FakeWs(lambda req: info_reply(req, network_id=7))
