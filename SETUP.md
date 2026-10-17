@@ -12,7 +12,7 @@ cp -r /mnt/<drive>/<path-to-repo>/ ~/xrpl && cd ~/xrpl      # keep it on the Lin
 ```
 bash setup/setup_ubuntu.sh check
 ```
-Fix anything it reports (RAM ≥ 64 GB for `huge`, filesystem, free space, systemd in WSL). `DB_PATH` must be a dedicated directory, not `/` or directly under `/` (the script `chown -R`s it). Full history wants 45 TB free (threshold from user notes, not verified).
+Fix anything it reports (RAM ≥ 64 GB for `huge`, filesystem, free space, systemd in WSL). `DB_PATH` must be a dedicated directory (the script `chown -R`s it): refused are `/` and anything directly under it, `/var/lib`, `/home/<user>`, and anything inside `/etc /usr /proc /sys /dev /boot`. If `DB_PATH` already holds files not owned by `xrpld`, the `node` step stops unless `FORCE=1`. Full history wants 45 TB free (threshold from user notes, not verified).
 
 ## 3. Install + configure the node
 ```
@@ -26,7 +26,7 @@ Uses the official XRPLF apt repo, backs up `/etc/xrpld/xrpld.cfg`, sets `[node_d
 MONGO_URI=mongodb://127.0.0.1:27017 bash setup/setup_ubuntu.sh ingest
 ```
 Creates `.venv`, installs deps (`requirements.txt`, runtime + test), writes `.env` (chmod 600; without `MONGO_URI` set you are asked, input hidden), runs the tests, pings Mongo, installs `xrpl-tail.service`. An existing `.env` is kept as is (only re-chmodded to 600; a `MONGO_URI` given on the command line is then ignored, with a warning).
-The service runs as the user who invoked the script (`$SUDO_USER`, else current user) and is not installed if that is root; `Restart=on-failure`, so the `process_status.txt` stop flag (clean exit) keeps it stopped. Run as a normal user with sudo.
+The service runs as the user who invoked the script (`$SUDO_USER`, else current user) and is not installed if that is root; `Restart=on-failure`, so the `process_status.txt` stop flag (clean exit) keeps it stopped, and `RestartPreventExitStatus=2`, so a config error (exit 2) is not retried every 10 s; `TimeoutStopSec=120` gives a graceful stop time to finish. Run as a normal user with sudo. (Unit settings not yet tested on a real systemd.)
 WSL → Windows Mongo: enable `networkingMode=mirrored` in `C:\Users\<you>\.wslconfig` (then `wsl --shutdown`), or use the host IP the script prints and set Mongo `bindIp` + firewall.
 
 ## 5. Watch the node sync, then ingest
@@ -38,7 +38,11 @@ python -m xrpl_ingest verify   --start 32570 --end 33570
 nohup python -m xrpl_ingest backfill > backfill.log 2>&1 &  # full; resumable, safe to rerun
 sudo systemctl enable --now xrpl-tail                        # live ledgers
 ```
-Stop gracefully: `echo current_process=0 > process_status.txt`. Retry gaps: `python -m xrpl_ingest retry-failed`.
+Retry gaps: `python -m xrpl_ingest retry-failed`.
+
+- **`.env`** is read from the directory you run the command in, so `cd` to the repo first. The systemd unit sets `WorkingDirectory=` to the repo for this.
+- **Graceful stop:** `echo current_process=0 > process_status.txt`, or SIGTERM (`systemctl stop xrpl-tail`, `kill <pid>`; Linux only, on Windows use the file). In-flight work finishes, nothing new starts.
+- **Exit codes** (all commands): `0` ok · `1` some ledgers failed, a backfill/retry stopped early, or verify found problems · `2` config/usage error (incl. node on the wrong network) · `3` backfill had no failures but the node lacks part of the range · `4` node or MongoDB unreachable / error · `130` Ctrl+C.
 
 ---
 
