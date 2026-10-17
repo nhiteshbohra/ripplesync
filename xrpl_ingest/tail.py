@@ -15,6 +15,14 @@ log = logging.getLogger(__name__)
 BIG_GAP = 1000  # ledgers behind before we suggest a backfill
 
 
+def start_after(highest_stored: int, latest: int) -> int:
+    """Ledger to continue after when there is no checkpoint: the highest stored one if it is
+    at most BIG_GAP behind, else just before the node's current ledger (go live now)."""
+    if highest_stored and latest - highest_stored <= BIG_GAP:
+        return highest_stored
+    return latest - 1
+
+
 async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: float,
                stop_check: Callable[[], bool], sleep: Sleep = asyncio.sleep,
                max_iterations: Optional[int] = None) -> int:
@@ -26,13 +34,11 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
     same ledger is retried after a backoff, so nothing is skipped silently.
 
     Without a checkpoint, tail continues after the highest stored ledger (e.g. where a
-    backfill ended); on an empty database it starts at the node's current ledger.
+    backfill ended) if that is at most BIG_GAP behind; further behind, or on an empty
+    database, it starts at the node's current ledger and logs the backfill for the hole.
     """
     last = await asyncio.to_thread(store.get_checkpoint)
-    if last == 0:
-        last = await asyncio.to_thread(store.highest_ledger)
-        if last:
-            log.info("no checkpoint; resuming after highest stored ledger %d", last)
+    highest = await asyncio.to_thread(store.highest_ledger) if last == 0 else 0
     iterations = 0
     node_failures = 0
     stalls = 0
@@ -52,8 +58,16 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             continue
 
         if last == 0:
-            last = latest - 1  # first run on an empty database: start at the current ledger
-            log.info("no checkpoint and no stored ledgers; starting at ledger %d", latest)
+            last = start_after(highest, latest)
+            if last == highest:
+                log.info("no checkpoint; resuming after highest stored ledger %d", highest)
+            elif highest:
+                log.warning("no checkpoint; highest stored ledger %d is %d ledgers behind, so "
+                            "starting at the current ledger %d. Fill the hole with: "
+                            "python -m xrpl_ingest backfill --start %d --end %d",
+                            highest, latest - highest, latest, highest + 1, latest - 1)
+            else:
+                log.info("no checkpoint and no stored ledgers; starting at ledger %d", latest)
 
         if latest <= last:
             await sleep(poll_interval)

@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
@@ -60,16 +61,36 @@ def test_backfill_then_tail_handoff_leaves_no_gap(cfg, store):
     assert store.find_gaps(lo, hi + 5) == []
 
 
-def test_resume_far_behind_still_suggests_backfill(store, caplog):
+def stop_after_fetches(src, n):
+    return lambda: len(src.calls) >= n
+
+
+def test_no_checkpoint_far_behind_starts_at_latest_and_prints_backfill_command(store, caplog):
+    """Auditor r14: after a smoke-test backfill ending at 33570, a first tail must not crawl
+    ~100M ledgers one by one; it goes live and says how to fill the hole."""
+    store_ledgers(store, [33570])
+    src = FakeSource(latest=101_000_000)
+    with caplog.at_level("INFO", logger="xrpl_ingest.tail"):
+        run_tail(src, store, stop=stop_after_fetches(src, 1), iterations=None)
+    assert src.calls == [101_000_000]
+    cmd = "python -m xrpl_ingest backfill --start 33571 --end 100999999"
+    assert [r for r in caplog.records if r.levelname == "WARNING" and cmd in r.getMessage()]
+
+
+@pytest.mark.parametrize("gap,first_fetch", [(BIG_GAP, 101), (BIG_GAP + 1, 100 + BIG_GAP + 1)])
+def test_no_checkpoint_gap_boundary(store, gap, first_fetch):
     store_ledgers(store, [100])
-    n = {"c": 0}
+    src = FakeSource(latest=100 + gap)
+    run_tail(src, store, stop=stop_after_fetches(src, 1), iterations=None)
+    assert src.calls == [first_fetch]  # gap == BIG_GAP still resumes; one more goes live
 
-    def stop():
-        n["c"] += 1
-        return n["c"] > 3  # loop check + 2 ledgers
 
+def test_checkpoint_far_behind_still_catches_up_and_suggests_backfill(store, caplog):
+    store.set_checkpoint(100)
+    src = FakeSource(latest=100 + BIG_GAP + 5)
     with caplog.at_level("WARNING", logger="xrpl_ingest.tail"):
-        run_tail(FakeSource(latest=100 + BIG_GAP + 5), store, stop=stop)
+        run_tail(src, store, stop=stop_after_fetches(src, 2), iterations=None)
+    assert src.calls == [101, 102]  # the checkpoint wins: no skipping
     assert any("consider `backfill`" in m for m in caplog.messages)
 
 
