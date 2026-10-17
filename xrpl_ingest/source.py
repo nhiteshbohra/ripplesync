@@ -32,7 +32,8 @@ class _Conn:
         self.ws = ws
         self.url = redact_url(url)  # only used in messages; never carries credentials
         self.pending: Dict[int, asyncio.Future] = {}
-        self.last_rx = time.monotonic()  # last message of any kind; silence => hung
+        self.received = 0  # messages of any kind; unchanged over a timeout => hung
+        self.last_rx = time.monotonic()  # for the log line only
         self.closed = False
         self.reader: Optional[asyncio.Task] = None
 
@@ -136,6 +137,7 @@ class WsSource:
         reason = "closed by peer"
         try:
             async for raw in conn.ws:
+                conn.received += 1
                 conn.last_rx = time.monotonic()
                 try:
                     msg = json.loads(raw)
@@ -186,13 +188,17 @@ class WsSource:
         fut = asyncio.get_running_loop().create_future()
         conn.pending[rid] = fut
         payload = {"id": rid, "command": command, "api_version": API_VERSION, **params}
+        seen = conn.received
         try:
             await conn.ws.send(json.dumps(payload))
             msg = await asyncio.wait_for(fut, timeout=self.request_timeout)
         except asyncio.TimeoutError:
             conn.pending.pop(rid, None)
-            silent = time.monotonic() - conn.last_rx
-            if silent >= self.request_timeout:  # nothing at all arrived: the socket is hung
+            # Nothing at all arrived during this request's whole timeout: the socket is hung.
+            # Decided by message count, not by measuring durations: asyncio fires timers up
+            # to one clock tick early (15.6 ms on Windows), so 'silent >= timeout' could miss.
+            if conn.received == seen:
+                silent = time.monotonic() - conn.last_rx
                 log.warning("no message from %s for %.1fs; dropping connection", conn.url, silent)
                 await self._drop(conn, f"connection to {conn.url} dropped: silent for {silent:.1f}s")
             # else: the connection is alive, only this request is slow; the others keep going

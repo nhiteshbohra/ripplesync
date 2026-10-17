@@ -144,6 +144,35 @@ def test_silent_connection_dropped_on_timeout_and_reconnects():
     assert len(made) == 2 and made[0].closed
 
 
+def test_silence_decision_does_not_depend_on_clock_precision(monkeypatch):
+    """Found under parallel load: asyncio fires timers up to one clock tick (15.6 ms on
+    Windows) early, so 'now - last message >= request_timeout' could come out just short
+    and a hung socket survived its first timeout. Freezing the clock source.py sees makes
+    that boundary deterministic: the drop must not depend on measured durations."""
+    import types
+    from xrpl_ingest import source as source_mod
+    monkeypatch.setattr(source_mod, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
+    made = []
+
+    async def connect(url, **_):
+        def handler(req):
+            if req["command"] == "server_info":
+                return info_reply(req)
+            return None if len(made) == 1 else default_handler(req)
+        made.append(FakeWs(handler))
+        return made[-1]
+
+    async def go():
+        s = make_source(connect)
+        with pytest.raises(RequestTimeout):
+            await s.get_ledger(1)
+        res = await s.get_ledger(2)
+        await s.close()
+        return res
+    assert run(go())["validated"] is True
+    assert len(made) == 2 and made[0].closed
+
+
 def test_slow_requests_time_out_alone_while_connection_is_active():
     """Auditor r06: a few slow ledgers timing out together must not drop a connection that
     is still delivering other responses (the old 3-consecutive-timeouts rule did)."""
