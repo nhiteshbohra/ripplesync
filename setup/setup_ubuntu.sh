@@ -31,6 +31,24 @@ is_wsl()     { grep -qi microsoft /proc/version 2>/dev/null; }
 has_systemd(){ [ -d /run/systemd/system ]; }
 SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 
+# DB_PATH gets `chown -R`: refuse / and top-level dirs so a typo cannot re-own the system.
+check_db_path() {
+  case "$(dirname "$(realpath -m -- "$DB_PATH")")" in
+    /|//) die "DB_PATH=$DB_PATH is / or directly under /; use a dedicated subdirectory, e.g. /data/xrpld/nudb" ;;
+  esac
+}
+
+# Point LINK at TARGET; an existing real file is moved aside first, never overwritten.
+link_cfg() {
+  local target="$1" link="$2" bak
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    bak="$link.bak.$(date +%s)"
+    $SUDO mv "$link" "$bak"
+    warn "$link was a regular file; moved it to $bak"
+  fi
+  $SUDO ln -sfn "$target" "$link"
+}
+
 preflight() {
   say "Preflight"
   . /etc/os-release
@@ -43,6 +61,7 @@ preflight() {
   echo "RAM: ${ram_gb} GB (node_size=huge wants 64 GB)"
   [ "$ram_gb" -ge 60 ] || { [ "$NODE_SIZE" != huge ] && true || need_ok "only ${ram_gb} GB RAM for node_size=huge (try NODE_SIZE=large)"; }
 
+  check_db_path
   local probe="$DB_PATH"; while [ ! -e "$probe" ]; do probe="$(dirname "$probe")"; done
   local fs free_tb
   fs=$(stat -f -c %T "$probe"); free_tb=$(df -BG --output=avail "$probe" | tail -1 | tr -dc 0-9); free_tb=$((free_tb/1024))
@@ -51,7 +70,9 @@ preflight() {
     [ "$free_tb" -ge 45 ] || need_ok "full history needs ~39 TB SSD and grows ~12 GB/day; only ~${free_tb} TB free"
     case "$fs" in ext*) need_ok "NuDB files exceed ext4's 16 TB file limit: use XFS or ZFS for DB_PATH" ;; esac
   fi
-  case "$probe" in /mnt/*) need_ok "DB_PATH is on a Windows drive (/mnt/..): far too slow for NuDB" ;; esac
+  if is_wsl; then
+    case "$probe" in /mnt/*) need_ok "DB_PATH is on a Windows drive (/mnt/..): far too slow for NuDB" ;; esac
+  fi
   is_wsl && has_systemd || { is_wsl && warn "WSL without systemd: add '[boot]\nsystemd=true' to /etc/wsl.conf, then 'wsl --shutdown'"; true; }
 }
 
@@ -74,7 +95,7 @@ install_node() {
 
   say "Preparing DB dir $DB_PATH"
   $SUDO mkdir -p "$DB_PATH"
-  if id xrpld >/dev/null 2>&1; then $SUDO chown -R xrpld:xrpld "$(dirname "$DB_PATH")" "$DB_PATH"
+  if id xrpld >/dev/null 2>&1; then $SUDO chown -R xrpld:xrpld "$DB_PATH"  # parent left as is: xrpld only needs to traverse it
   else warn "no 'xrpld' user found; fix ownership of $DB_PATH to match the service user"; fi
 
   say "Editing $CFG (backup made; history=$HISTORY_MODE)"
@@ -84,8 +105,8 @@ install_node() {
   for p in "${parts[@]:-}"; do [ -n "$p" ] && peers+=(--peer "$p"); done
   $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$CFG" --db-path "$DB_PATH" \
        --history "$HISTORY_MODE" --node-size "$NODE_SIZE" "${peers[@]}"
-  $SUDO ln -sf "$CFG" /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
-  $SUDO ln -sf "$CFG" /etc/opt/ripple/rippled.cfg 2>/dev/null || true
+  link_cfg "$CFG" /etc/opt/ripple/xrpld.cfg
+  link_cfg "$CFG" /etc/opt/ripple/rippled.cfg
   [ "$HISTORY_MODE" = full ] && [ -z "${FIXED_PEERS:-}" ] && \
     warn "full history: add [ips_fixed] peers that hold full history (see xrpl.org 'Configure Full History'); re-run with FIXED_PEERS='host port'"
 

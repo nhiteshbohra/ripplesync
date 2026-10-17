@@ -58,6 +58,17 @@ fi
 is_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
 has_systemd() { [ -d /run/systemd/system ]; }
 
+# Point LINK at TARGET; an existing real file is moved aside first, never overwritten.
+link_cfg() {
+  local target="$1" link="$2" bak
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    bak="$link.bak.$(date +%s)"
+    $SUDO mv "$link" "$bak"
+    warn "$link was a regular file; moved it to $bak"
+  fi
+  $SUDO ln -sfn "$target" "$link"
+}
+
 clear 2>/dev/null || true
 cat << "BANNER"
   __   __ _____  _____   _        _____                         _   
@@ -97,17 +108,24 @@ if [ "$HISTORY_MODE" = "full" ] && [ "$RAM_GB" -lt 60 ]; then
   need_ok "Full history mode with node_size=huge strongly recommends >= 64 GB RAM (detected ${RAM_GB} GB)"
 fi
 
+# DB_PATH gets `chown -R`: refuse / and top-level dirs so a typo cannot re-own the system.
+case "$(dirname "$(realpath -m -- "$DB_PATH")")" in
+  /|//) die "DB_PATH=$DB_PATH is / or directly under /; use a dedicated subdirectory, e.g. /data/xrpld/nudb" ;;
+esac
+
 PROBE_DIR="$DB_PATH"
 while [ ! -e "$PROBE_DIR" ]; do PROBE_DIR="$(dirname "$PROBE_DIR")"; done
 FS_TYPE=$(stat -f -c %T "$PROBE_DIR" 2>/dev/null || echo "unknown")
 FREE_GB=$(df -BG --output=avail "$PROBE_DIR" 2>/dev/null | tail -1 | tr -dc 0-9 || echo 0)
 echo "Storage for DB: $PROBE_DIR ($FS_TYPE, ${FREE_GB} GB free)"
 
-case "$PROBE_DIR" in
-  /mnt/*)
-    need_ok "DB_PATH is on a Windows mount (/mnt/..). Virtual 9P mounts are too slow and can cause NuDB corruption! Please use native Linux path."
-    ;;
-esac
+if is_wsl; then
+  case "$PROBE_DIR" in
+    /mnt/*)
+      need_ok "DB_PATH is on a Windows mount (/mnt/..). Virtual 9P mounts are too slow and can cause NuDB corruption! Please use native Linux path."
+      ;;
+  esac
+fi
 
 if [ "$HISTORY_MODE" = "full" ]; then
   FREE_TB=$((FREE_GB / 1024))
@@ -189,7 +207,7 @@ has_systemd && $SUDO systemctl stop xrpld 2>/dev/null || true
 say "Configuring storage directory at $DB_PATH..."
 $SUDO mkdir -p "$DB_PATH"
 if id xrpld >/dev/null 2>&1; then
-  $SUDO chown -R xrpld:xrpld "$(dirname "$DB_PATH")" "$DB_PATH"
+  $SUDO chown -R xrpld:xrpld "$DB_PATH"  # parent left as is: xrpld only needs to traverse it
 else
   warn "User 'xrpld' not found yet; make sure permissions match the service user."
 fi
@@ -210,8 +228,8 @@ $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" /etc/xrpld/xrpld.cfg \
   --node-size "$NODE_SIZE" \
   "${PEER_ARGS[@]}"
 
-$SUDO ln -sf /etc/xrpld/xrpld.cfg /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
-$SUDO ln -sf /etc/xrpld/xrpld.cfg /etc/opt/ripple/rippled.cfg 2>/dev/null || true
+link_cfg /etc/xrpld/xrpld.cfg /etc/opt/ripple/xrpld.cfg
+link_cfg /etc/xrpld/xrpld.cfg /etc/opt/ripple/rippled.cfg
 
 if has_systemd; then
   say "Starting xrpld service..."
