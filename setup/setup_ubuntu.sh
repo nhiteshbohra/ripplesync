@@ -131,7 +131,9 @@ setup_ingest() {
     local uri="${MONGO_URI:-}"
     if [ -z "$uri" ]; then
       if is_wsl; then echo "WSL hint: Windows host IP is $(ip route | awk '/default/ {print $3}') (or use mirrored networking, then 127.0.0.1)"; fi
-      read -r -p "MONGO_URI (e.g. mongodb://127.0.0.1:27017): " uri
+      while [ -z "$uri" ]; do
+        read -rs -p "MONGO_URI (input hidden; e.g. mongodb://127.0.0.1:27017): " uri; echo
+      done
     fi
     cp "$REPO_DIR/.env.example" "$REPO_DIR/.env"
     chmod 600 "$REPO_DIR/.env"
@@ -140,7 +142,9 @@ setup_ingest() {
     sed -i "s|^MONGO_URI=.*|MONGO_URI=${esc}|" "$REPO_DIR/.env"
     say ".env created (chmod 600)"
   else
-    say ".env already exists; leaving it alone"
+    chmod 600 "$REPO_DIR/.env"
+    say ".env already exists; leaving its contents alone (chmod 600)"
+    [ -z "${MONGO_URI:-}" ] || warn "MONGO_URI from the environment was ignored because .env already exists; edit .env to change it"
   fi
 
   say "Running tests"
@@ -151,7 +155,7 @@ setup_ingest() {
 import os, sys
 from dotenv import load_dotenv
 from pymongo import MongoClient
-load_dotenv()
+load_dotenv(os.path.join(os.getcwd(), ".env"))  # explicit path: find_dotenv() asserts when run from stdin
 try:
     MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=5000).admin.command("ping")
     print("MongoDB: OK")

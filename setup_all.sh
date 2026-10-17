@@ -27,6 +27,7 @@ HISTORY_MODE="${HISTORY_MODE:-pruned}"
 NODE_SIZE="${NODE_SIZE:-medium}"
 DB_PATH="${DB_PATH:-/var/lib/xrpld/db/nudb}"
 FIXED_PEERS="${FIXED_PEERS:-}"
+MONGO_URI_GIVEN="${MONGO_URI:+1}"
 MONGO_URI="${MONGO_URI:-mongodb://127.0.0.1:27017}"
 FORCE="${FORCE:-0}"
 
@@ -88,7 +89,7 @@ echo "Configuration:"
 echo "  Mode:       $HISTORY_MODE"
 echo "  Node Size:  $NODE_SIZE"
 echo "  DB Path:    $DB_PATH"
-echo "  MongoDB:    $(printf '%s' "$MONGO_URI" | sed -E 's#//[^@/]*@#//***@#')"  # hide credentials
+echo "  MongoDB:    $(printf '%s' "$MONGO_URI" | sed -E 's#://.*@#://***@#')"  # hide credentials (greedy: passwords may contain @ or /)
 echo ""
 
 # ------------------------------------------------------------------------------
@@ -269,7 +270,9 @@ if [ ! -f "$REPO_DIR/.env" ]; then
   sed -i "s|^MONGO_URI=.*|MONGO_URI=${ESC_URI}|" "$REPO_DIR/.env"
   ok ".env created (chmod 600)"
 else
-  ok ".env already exists (preserved)"
+  chmod 600 "$REPO_DIR/.env"
+  ok ".env already exists (preserved, chmod 600)"
+  [ -z "$MONGO_URI_GIVEN" ] || warn "MONGO_URI from the environment was ignored because .env already exists; edit .env to change it"
 fi
 
 echo ""
@@ -287,7 +290,7 @@ say "Verifying MongoDB connectivity..."
 import os, sys
 from dotenv import load_dotenv
 from pymongo import MongoClient
-load_dotenv()
+load_dotenv(os.path.join(os.getcwd(), ".env"))  # explicit path: find_dotenv() asserts when run from stdin
 uri = os.environ.get("MONGO_URI", "mongodb://127.0.0.1:27017")
 try:
     MongoClient(uri, serverSelectionTimeoutMS=4000).admin.command("ping")
