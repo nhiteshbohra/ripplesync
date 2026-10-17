@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 
 import pytest
@@ -221,6 +222,39 @@ def test_send_failure_reason_reaches_other_pending_requests():
             await inflight
         await s.close()
     run(go())
+
+
+class ReaderDiesDuringSendWs(FakeWs):
+    """The socket dies while a ledger request is being sent: the reader fails the pending
+    future first, then send() raises. That future's exception must still be retrieved."""
+
+    async def send(self, raw):
+        if json.loads(raw)["command"] != "ledger":
+            return await super().send(raw)
+        self.fail(ConnectionClosedError(None, Close(1011, "gone")))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # reader runs and fails every pending future
+        raise ConnectionError("closed")
+
+
+def test_send_failure_after_reader_failed_future_leaves_nothing_unretrieved():
+    loop_errors = []
+
+    async def connect(url, **_):
+        return ReaderDiesDuringSendWs(default_handler)
+
+    async def go():
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, ctx: loop_errors.append(ctx.get("message", "")))
+        s = make_source(connect)
+        try:
+            await s.get_ledger(1)
+        except ConnectionLost:
+            pass
+        await s.close()
+        gc.collect()  # an unretrieved future reports itself when collected
+    run(go())
+    assert not [m for m in loop_errors if "never retrieved" in m]
 
 
 def test_own_close_does_not_log_warning(caplog):

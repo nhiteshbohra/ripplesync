@@ -43,6 +43,17 @@ class _Conn:
         self.pending.clear()
 
 
+def _forget(conn: _Conn, rid: int, fut: asyncio.Future) -> None:
+    """Request finished (any outcome): unregister it and mark the future's exception as
+    retrieved. The reader may have failed it while send() was still raising; asyncio would
+    then log 'Future exception was never retrieved'. The caller already raised its own error."""
+    conn.pending.pop(rid, None)
+    if not fut.done():
+        fut.cancel()
+    elif not fut.cancelled():
+        fut.exception()
+
+
 class WsSource:
     def __init__(self, servers: Sequence[str], *, request_timeout: float = 30,
                  connect_retries: int = 5, backoff_base: float = 1.0, backoff_max: float = 30.0,
@@ -188,6 +199,8 @@ class WsSource:
             reason = f"{type(e).__name__}: {e}"  # e.g. websockets 1009 message too big
             await self._drop(conn, f"connection to {conn.url} dropped: {reason}")
             raise ConnectionLost(f"{command} failed: {reason}") from e
+        finally:
+            _forget(conn, rid, fut)
 
         conn.timeouts = 0
         result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
