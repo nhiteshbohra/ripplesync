@@ -75,7 +75,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.command == "verify":
                 return _verify(store, args.start, args.end)
             if args.command == "status":
-                return asyncio.run(_status(cfg, store))
+                return asyncio.run(_status(cfg, store, stop))
         finally:
             store.close()
     except KeyboardInterrupt:
@@ -103,7 +103,7 @@ def backfill_exit_code(summary: dict) -> int:
 
 
 async def _run_tail(cfg: Config, store: MongoStore, stop) -> int:
-    source = WsSource.from_config(cfg)
+    source = WsSource.from_config(cfg, stop_check=stop)
     try:
         await tail(source, store, retry_policy(cfg), poll_interval=cfg.polling_interval_seconds,
                    stop_check=stop)
@@ -113,7 +113,7 @@ async def _run_tail(cfg: Config, store: MongoStore, stop) -> int:
 
 
 async def _run_retry(cfg: Config, store: MongoStore, rounds: int, stop) -> int:
-    source = WsSource.from_config(cfg)
+    source = WsSource.from_config(cfg, stop_check=stop)
     try:
         return await retry_failed(source, store, retry_policy(cfg), max_rounds=rounds,
                                   concurrency=cfg.concurrency, stop_check=stop)
@@ -138,10 +138,10 @@ def _verify(store: MongoStore, start: int, end: int) -> int:
     return 1 if bad else 0
 
 
-async def _status(cfg: Config, store: MongoStore) -> int:
+async def _status(cfg: Config, store: MongoStore, stop=lambda: False) -> int:
     """Node part first; DB stats are printed even when the node cannot be reached."""
     code = 0
-    source = WsSource.from_config(cfg)
+    source = WsSource.from_config(cfg, stop_check=stop)
     try:
         ranges, latest = await discover_node(source)
         print(f"node complete_ledgers: {ranges}  latest validated: {latest}")

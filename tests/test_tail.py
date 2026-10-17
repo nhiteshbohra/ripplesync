@@ -6,7 +6,7 @@ from pymongo.errors import AutoReconnect
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
 from xrpl_ingest import stopflag
 from xrpl_ingest.backfill import run_backfill
-from xrpl_ingest.errors import ConnectFailed, RpcError
+from xrpl_ingest.errors import ConnectFailed, RpcError, StopRequested
 from xrpl_ingest.fetcher import RetryPolicy
 from xrpl_ingest.store import LAST_LEDGER_ID
 from xrpl_ingest.tail import BIG_GAP, tail
@@ -151,6 +151,40 @@ def test_sigterm_stops_tail_like_the_stop_file(store, tmp_path):
     path = str(tmp_path / "missing.txt")
     last = run_tail(src, store, stop=lambda: stopflag.stop_requested(path), iterations=None)
     assert last == 13 and store.get_checkpoint() == 13  # in-flight ledger finished, then stop
+
+
+def test_stop_while_node_unreachable_exits_without_backoff(store):
+    store.set_checkpoint(99)
+    stopped = {"v": False}
+    src = FakeSource(latest=100)
+
+    class StopWhileConnecting(list):
+        def __bool__(self):
+            return True
+
+        def pop(self, i):
+            stopped["v"] = True
+            return StopRequested("stopped while connecting")
+
+    src.latest_errors = StopWhileConnecting()
+    sleeps = []
+    assert run_tail(src, store, iterations=10, stop=lambda: stopped["v"], sleeps=sleeps) == 99
+    assert sleeps == []  # no backoff sleep between the stop and the exit
+
+
+def test_stop_during_unrecorded_ledger_exits_without_backoff(store):
+    store.set_checkpoint(99)
+    stopped = {"v": False}
+
+    class StopOnLedger(FakeSource):
+        async def get_ledger(self, index):
+            stopped["v"] = True
+            raise StopRequested("stopped while connecting")
+
+    sleeps = []
+    assert run_tail(StopOnLedger(latest=100), store, iterations=10, stop=lambda: stopped["v"],
+                    sleeps=sleeps) == 99
+    assert store.get_checkpoint() == 99 and sleeps == [] and store.list_failed() == []
 
 
 def test_stop_flag_halts_immediately(store):

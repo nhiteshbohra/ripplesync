@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from .constants import MAX_BACKOFF_EXPONENT
-from .errors import is_retryable
+from .errors import StopRequested, is_retryable
 from .transform import parse_ledger_result
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ async def ingest_ledger(source: Any, store: Any, index: int, retry: RetryPolicy,
             return IngestResult(index, True, len(tx_docs))
         except Exception as e:  # noqa: BLE001 - classified below
             last_error = f"{type(e).__name__}: {e}"
+            if isinstance(e, StopRequested):  # shutting down: not a ledger failure, keep no record
+                log.info("ledger %d: not fetched, stop requested", index)
+                return IngestResult(index, False, error=last_error, recorded=False)
             if not is_retryable(e):
                 log.error("ledger %d: permanent failure: %s", index, last_error)
                 break

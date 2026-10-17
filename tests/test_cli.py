@@ -1,3 +1,4 @@
+import dataclasses
 import os
 
 import pytest
@@ -115,23 +116,43 @@ class DeadNode:
 
 
 def test_status_prints_db_stats_when_node_unreachable(cli_main, monkeypatch, capsys):
-    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg: DeadNode())
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: DeadNode())
     assert cli_main(["status"]) == 4
     out = capsys.readouterr().out
     assert "node: error: ConnectFailed" in out and "database: {" in out
 
 
 def test_status_ok(cli_main, monkeypatch, capsys):
-    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg: FakeSource(latest=100))
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: FakeSource(latest=100))
     assert cli_main(["status"]) == 0
     out = capsys.readouterr().out
     assert "latest validated: 100" in out and "database: {" in out
 
 
+@pytest.mark.parametrize("command,target", [("status", "_status"), ("tail", "tail"),
+                                            ("retry-failed", "retry_failed")])
+def test_sources_get_the_stop_check(cli_main, monkeypatch, cfg, tmp_path, command, target):
+    """The node connection gives up between connect attempts once a stop is requested."""
+    flag = tmp_path / "status.txt"
+    monkeypatch.setattr(cli.Config, "from_env", staticmethod(
+        lambda env=None: dataclasses.replace(cfg, process_status_file=str(flag))))
+    seen = []
+    monkeypatch.setattr(cli.WsSource, "from_config",
+                        lambda _cfg, **kw: seen.append(kw.get("stop_check")) or DeadNode())
+    if target != "_status":
+        async def done(*a, **k):
+            return 0
+        monkeypatch.setattr(cli, target, done)
+    cli_main([command])
+    assert len(seen) == 1 and seen[0]() is False
+    flag.write_text("current_process=0")
+    assert seen[0]() is True
+
+
 def test_main_installs_sigterm_handler(cli_main, monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "install_stop_signal", lambda: calls.append(1) or True)
-    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg: FakeSource(latest=100))
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: FakeSource(latest=100))
     assert cli_main(["status"]) == 0 and calls == [1]
 
 

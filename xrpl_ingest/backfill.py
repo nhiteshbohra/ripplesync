@@ -84,12 +84,15 @@ def _run_chunk_in_process(args: Tuple[Config, Range]) -> ChunkResult:
         install_stop_signal()  # systemd may SIGTERM the whole group: stop the chunk cleanly
         _store_cache = MongoStore.from_config(cfg)
 
+    def stop() -> bool:
+        return stop_requested(cfg.process_status_file)
+
     async def go() -> ChunkResult:
-        source = WsSource.from_config(cfg)
+        source = WsSource.from_config(cfg, stop_check=stop)
         try:
             return await process_chunk(
                 source, _store_cache, chunk, concurrency=cfg.concurrency, retry=retry_policy(cfg),
-                stop_check=lambda: stop_requested(cfg.process_status_file))
+                stop_check=stop)
         finally:
             await source.close()
 
@@ -116,7 +119,8 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
     own_store = store is None
     store = store or MongoStore.from_config(cfg)
     own_source = source is None
-    source = source or WsSource.from_config(cfg)
+    source = source or WsSource.from_config(
+        cfg, stop_check=lambda: stop_requested(cfg.process_status_file))
     t0 = time.time()
     try:
         store.ensure_indexes()

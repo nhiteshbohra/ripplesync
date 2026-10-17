@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
 
 from .config import Config, redact_url
 from .errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
-                     RpcError, TransientError)
+                     RpcError, StopRequested, TransientError)
 from .fetcher import RetryPolicy
 
 log = logging.getLogger(__name__)
@@ -60,7 +60,8 @@ class WsSource:
                  connect_retries: int = 5, backoff_base: float = 1.0, backoff_max: float = 30.0,
                  expected_network_id: Optional[int] = 0, max_message_bytes: int = 64 * 1024 * 1024,
                  connect_fn: Optional[ConnectFn] = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, jitter: bool = True):
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, jitter: bool = True,
+                 stop_check: Callable[[], bool] = lambda: False):
         if not servers:
             raise ValueError("at least one server is required")
         self.servers = tuple(servers)
@@ -73,6 +74,7 @@ class WsSource:
         self.max_message_bytes = max_message_bytes
         self._connect_fn = connect_fn or _default_connect
         self._sleep = sleep
+        self._stop_check = stop_check  # checked between connect attempts (stop file / SIGTERM)
         self._conn: Optional[_Conn] = None
         self._lock: Optional[asyncio.Lock] = None
         self._ids = itertools.count(1)
@@ -103,6 +105,8 @@ class WsSource:
         mismatched = 0
         for url in self.servers:
             for attempt in range(self.connect_retries):
+                if self._stop_check():  # before every attempt, so also right after a backoff
+                    raise StopRequested("stopped: stop requested while connecting")
                 conn = None
                 try:
                     ws = await self._connect_fn(url, timeout=self.request_timeout,

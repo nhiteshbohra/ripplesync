@@ -8,7 +8,7 @@ from websockets.frames import Close
 
 from conftest import FakeWs, no_sleep
 from xrpl_ingest.errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
-                                RpcError, TransientError, is_retryable)
+                                RpcError, StopRequested, TransientError, is_retryable)
 from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger
 from xrpl_ingest.source import WsSource, redact_url
 
@@ -440,6 +440,33 @@ def test_all_servers_fail():
         await make_source(connect).server_info()
     with pytest.raises(ConnectFailed, match="refused"):
         run(go())
+
+
+def test_stop_during_failover_returns_promptly():
+    tried, sleeps = [], []
+    stopped = {"v": False}
+
+    async def connect(url, **_):
+        tried.append(url)
+        stopped["v"] = True  # stop file / SIGTERM arrives while we are failing over
+        raise OSError("refused")
+
+    async def rec_sleep(d):
+        sleeps.append(d)
+
+    s = WsSource(["ws://a", "ws://b", "ws://c"], connect_retries=5, backoff_base=1.0,
+                 connect_fn=connect, sleep=rec_sleep, stop_check=lambda: stopped["v"])
+    with pytest.raises(StopRequested) as e:
+        run(s.server_info())
+    assert isinstance(e.value, ConnectFailed) and not is_retryable(e.value)
+    assert tried == ["ws://a"]  # no further attempts, servers or backoff sleeps
+    assert len(sleeps) <= 1
+
+
+def test_stop_check_defaults_to_never():
+    s = make_source(single()[0])
+    assert run(s.server_info())["validated_ledger"]["seq"] == 100
+    run(s.close())
 
 
 def test_testnet_server_rejected_by_network_check():

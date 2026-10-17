@@ -339,6 +339,26 @@ def test_sigterm_mid_chunk_stops_inline_backfill_unmarked(cfg, store):
     assert store.done_chunks(lo, hi) == set() and len(src.calls) < 10
 
 
+def test_backfill_sources_get_the_stop_check(cfg, store, tmp_path, monkeypatch):
+    flag = tmp_path / "s.txt"
+    cfg = dataclasses.replace(cfg, process_status_file=str(flag))
+    seen = []
+
+    def from_config(_cfg, **kw):
+        seen.append(kw.get("stop_check"))
+        return FakeSource(latest=32579, ranges="32570-32579")
+
+    monkeypatch.setattr(backfill.WsSource, "from_config", from_config)
+    monkeypatch.setattr(backfill, "_store_cache", store)
+    monkeypatch.setattr(backfill, "setup_logging", lambda level: None)
+    monkeypatch.setattr(backfill, "install_stop_signal", lambda: True)
+    run_backfill(cfg, 32570, 32579, store=store, inline=True)  # discovery source
+    backfill._run_chunk_in_process((cfg, (32570, 32579)))  # pool worker source
+    assert len(seen) == 2 and all(s is not None and s() is False for s in seen)
+    flag.write_text("current_process=0")
+    assert all(s() is True for s in seen)
+
+
 def test_pool_worker_installs_sigterm_handler_once(cfg, store, tmp_path, monkeypatch):
     flag = tmp_path / "s.txt"
     flag.write_text("current_process=0")

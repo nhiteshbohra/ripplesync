@@ -52,6 +52,8 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             latest = await source.latest_validated()
             node_failures = 0
         except (TransientError, RpcError) as e:
+            if stop_check():  # e.g. StopRequested while reconnecting: exit, no backoff first
+                break
             log.warning("cannot read latest validated ledger: %s", e)
             await sleep(retry.delay(node_failures))
             node_failures += 1
@@ -81,6 +83,8 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
                 return last
             res = await ingest_ledger(source, store, idx, retry)
             if not res.ok and not res.recorded:
+                if stop_check():  # stopped mid-ledger: checkpoint stays, no backoff first
+                    return last
                 log.error("ledger %d failed and could not be recorded; holding checkpoint at %d",
                           idx, last)
                 await sleep(retry.delay(stalls))

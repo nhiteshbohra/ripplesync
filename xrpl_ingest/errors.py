@@ -20,6 +20,11 @@ class ConnectFailed(TransientError):
     """No configured server could be reached. (All on the wrong network => NetworkMismatch.)"""
 
 
+class StopRequested(ConnectFailed):
+    """Connecting was abandoned because a stop was requested (stop file / SIGTERM).
+    Not retried and not recorded as a ledger failure."""
+
+
 class ConnectionLost(TransientError):
     """Websocket dropped while a request was in flight."""
 
@@ -57,6 +62,8 @@ class RpcError(IngestError):
 
 
 def is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, StopRequested):
+        return False
     if isinstance(exc, TransientError):
         return True
     if isinstance(exc, RpcError):

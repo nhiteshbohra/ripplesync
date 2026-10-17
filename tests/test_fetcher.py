@@ -3,7 +3,7 @@ import asyncio
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
-from xrpl_ingest.errors import ConnectionLost, RequestTimeout, RpcError
+from xrpl_ingest.errors import ConnectionLost, RequestTimeout, RpcError, StopRequested
 from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger
 
 
@@ -99,6 +99,14 @@ def test_record_failure_error_is_swallowed(store, monkeypatch):
     r = ingest(FakeSource({100: [RpcError("lgrNotFound")]}), store)
     assert not r.ok  # no exception escaped
     assert not r.recorded
+
+
+def test_stop_while_connecting_is_neither_retried_nor_recorded(store):
+    src = FakeSource({100: [StopRequested("stopped while connecting")] * 5})
+    r = ingest(src, store)
+    assert not r.ok and not r.recorded and r.error.startswith("StopRequested")
+    assert src.calls == [100]  # no retries
+    assert store.list_failed() == []  # a stop is not a ledger failure
 
 
 def test_recorded_failure_is_flagged_recorded(store):
