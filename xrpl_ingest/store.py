@@ -114,6 +114,10 @@ class MongoStore:
     def list_failed(self) -> List[int]:
         return sorted(d["block_number"] for d in self.failed.find({}, {"block_number": 1}))
 
+    def list_failed_with_reasons(self) -> List[Tuple[int, str]]:
+        docs = self.failed.find({}, {"block_number": 1, "reason": 1})
+        return sorted((d["block_number"], str(d.get("reason", ""))) for d in docs)
+
     def count_failed(self) -> int:
         return self.failed.count_documents({})
 

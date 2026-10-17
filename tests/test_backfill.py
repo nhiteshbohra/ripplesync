@@ -4,12 +4,15 @@ import os
 
 import pytest
 from pymongo.errors import AutoReconnect
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
-from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
+from conftest import FAST_RETRY, FakeSource, FakeWs, make_result, no_sleep
 from xrpl_ingest import backfill
 from xrpl_ingest.backfill import (ChunkResult, discover_node, process_chunk, retry_failed,
                                   run_backfill)
 from xrpl_ingest.errors import IngestError, RequestTimeout, RpcError
+from xrpl_ingest.source import WsSource
 
 
 def run(coro):
@@ -173,6 +176,70 @@ def test_retry_failed_honours_stop(store):
     src = FakeSource()
     remaining = run(retry_failed(src, store, FAST_RETRY, stop_check=lambda: True, sleep=no_sleep))
     assert remaining == 1 and src.calls == []
+
+
+POISON = 33905
+SHARED_SOCKET_DEATH = ("ConnectionLost: connection to ws://n closed: ConnectionClosedError: "
+                       "sent 1009 (message too big) frame exceeds limit of 1000000 bytes")
+
+
+def poison_node():
+    """Real WsSource over a fake socket: requesting POISON closes the socket with 1009 (like
+    an oversized ledger), failing every other request in flight on it. Others answer after
+    20 ms, so they are in flight whenever POISON is fetched concurrently."""
+    async def connect(url, **_):
+        def handler(req):
+            if req["command"] == "server_info":
+                return {"id": req["id"], "status": "success", "result": {"info": {}}}
+            idx = req["ledger_index"]
+            if idx == POISON:
+                ws.fail(ConnectionClosedError(None, Close(1009, "frame exceeds limit")))
+                return None
+            reply = {"id": req["id"], "status": "success", "result": make_result(idx)}
+            asyncio.get_running_loop().call_later(0.02, ws.push, reply)
+            return None
+        ws = FakeWs(handler)
+        return ws
+    return WsSource(["ws://n"], connect_fn=connect, sleep=no_sleep, backoff_base=0,
+                    request_timeout=5)
+
+
+def test_list_failed_with_reasons(store):
+    store.record_failure(7, "RpcError: lgrNotFound")
+    store.record_failure(3, "ConnectionLost: x")
+    assert store.list_failed_with_reasons() == [(3, "ConnectionLost: x"), (7, "RpcError: lgrNotFound")]
+    assert store.list_failed() == [3, 7]  # unchanged for existing callers
+
+
+@pytest.mark.parametrize("reason,suspect", [
+    (SHARED_SOCKET_DEATH, True), ("ConnectionLost: connection dropped", True),
+    ("ConnectionClosedError: received 1009 (message too big)", True),
+    ("RpcError: lgrNotFound", False), ("RequestTimeout: ledger timed out after 30s", False),
+])
+def test_shared_socket_suspects(reason, suspect):
+    assert backfill.may_have_killed_neighbours(reason) is suspect
+
+
+def test_retry_failed_isolates_poison_ledger_so_neighbours_recover(store):
+    """Auditor C stage 18: one ledger stays oversized; the neighbours that died with it on
+    the shared socket must recover instead of dying with it again every round."""
+    for idx in range(POISON, POISON + 4):
+        store.record_failure(idx, SHARED_SOCKET_DEATH)
+    src = poison_node()
+    remaining = run(retry_failed(src, store, FAST_RETRY, max_rounds=3, concurrency=4,
+                                 sleep=no_sleep))
+    run(src.close())
+    assert store.list_failed() == [POISON] and remaining == 1
+    assert store.ledgers.count_documents({"block_number": {"$gt": POISON}}) == 3
+
+
+def test_retry_failed_runs_ordinary_failures_concurrently_first(store, monkeypatch):
+    store.record_failure(5, "ConnectionLost: connection dropped")
+    for idx in (6, 7):
+        store.record_failure(idx, "RpcError: lgrNotFound")
+    src = FakeSource()
+    assert run(retry_failed(src, store, FAST_RETRY, max_rounds=1, sleep=no_sleep)) == 0
+    assert src.calls[-1] == 5 and sorted(src.calls[:2]) == [6, 7]
 
 
 def test_chunk_with_unrecorded_failure_is_not_marked_done(store, monkeypatch):

@@ -210,26 +210,43 @@ def _log_chunk(r: ChunkResult, t0: float) -> None:
              r.chunk[0], r.chunk[1], r.ok, r.failed, r.unrecorded, r.completed, time.time() - t0)
 
 
+def may_have_killed_neighbours(reason: str) -> bool:
+    """A lost socket (e.g. websockets 1009 message too big) fails every request on it."""
+    return reason.startswith("ConnectionLost") or "1009" in reason or "message too big" in reason
+
+
+async def _reingest(source: Any, store: Any, indices: List[int], retry: RetryPolicy,
+                    concurrency: int, stop_check: Callable[[], bool], sleep: Sleep) -> None:
+    it = iter(indices)  # shared; next() has no await so it is race-free
+
+    async def worker() -> None:
+        for idx in it:
+            if stop_check():
+                return
+            await ingest_ledger(source, store, idx, retry, clear_failure=True, sleep=sleep)
+
+    await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
+
+
 async def retry_failed(source: Any, store: Any, retry: RetryPolicy, *, max_rounds: int = 5,
                        concurrency: int = 4, stop_check: Callable[[], bool] = lambda: False,
                        sleep: Sleep = asyncio.sleep) -> int:
-    """Re-ingest ledgers in the failed collection. Returns how many remain."""
+    """Re-ingest ledgers in the failed collection. Returns how many remain.
+
+    Ledgers whose failure was a lost connection go last, one at a time: an oversized
+    ledger kills the shared socket, so retrying it next to its neighbours would make them
+    fail again every round. Alone, the neighbours recover and only the poison one remains.
+    """
     for rnd in range(1, max_rounds + 1):
-        failed = await asyncio.to_thread(store.list_failed)
+        failed = await asyncio.to_thread(store.list_failed_with_reasons)
         if not failed:
             return 0
-        log.info("retry round %d/%d: %d failed ledgers", rnd, max_rounds, len(failed))
-        it = iter(failed)
-
-        async def worker() -> None:
-            # B023 is a false positive: every worker is awaited (gather below) inside this
-            # same round, so `it` is always the current round's iterator.
-            for idx in it:  # noqa: B023
-                if stop_check():
-                    return
-                await ingest_ledger(source, store, idx, retry, clear_failure=True, sleep=sleep)
-
-        await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
+        alone = [n for n, reason in failed if may_have_killed_neighbours(reason)]
+        together = [n for n, reason in failed if not may_have_killed_neighbours(reason)]
+        log.info("retry round %d/%d: %d failed ledgers (%d one at a time after the others)",
+                 rnd, max_rounds, len(failed), len(alone))
+        for indices, workers in ((together, concurrency), (alone, 1)):
+            await _reingest(source, store, indices, retry, workers, stop_check, sleep)
         if stop_check():
             break
         if await asyncio.to_thread(store.count_failed) and rnd < max_rounds:
