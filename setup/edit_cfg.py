@@ -59,7 +59,7 @@ def remove_stanza(text: str, name: str) -> str:
 
 
 def ensure_stanza(text: str, name: str, body: List[str]) -> str:
-    pre, sections = _split(text)
+    _, sections = _split(text)
     if any(s[0] == name for s in sections):
         return text
     return set_stanza(text, name, body)
