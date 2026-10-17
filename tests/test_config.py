@@ -42,6 +42,17 @@ def test_invalid_numbers(name, val):
         Config.from_env({**BASE, name: val})
 
 
+@pytest.mark.parametrize("name,val", [("BACKOFF_MAX", "nan"), ("RECONNECT_DELAY_BASE", "inf"),
+                                      ("POLLING_INTERVAL_SECONDS", "Infinity")])
+def test_non_finite_floats_rejected(name, val):
+    with pytest.raises(ConfigError, match=f"{name}.*finite"):
+        Config.from_env({**BASE, name: val})
+
+
+def test_finite_float_accepted():
+    assert Config.from_env({**BASE, "BACKOFF_MAX": "2.5"}).backoff_max == 2.5
+
+
 def test_all_errors_reported_together():
     with pytest.raises(ConfigError) as e:
         Config.from_env({"MAX_RETRIES": "x", "CHUNK_SIZE": "0"})

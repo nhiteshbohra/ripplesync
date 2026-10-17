@@ -1,6 +1,7 @@
 """Configuration from environment variables. Validates everything up front."""
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -56,6 +57,9 @@ class Config:
                 v = cast(raw)
             except ValueError:
                 errors.append(f"{name}={raw!r} is not a valid {cast.__name__}")
+                return default
+            if not math.isfinite(v):  # nan passes `< minimum`; sleep(nan) never returns
+                errors.append(f"{name}={raw!r} must be a finite number")
                 return default
             if v < minimum:
                 errors.append(f"{name}={raw} must be >= {minimum}")
