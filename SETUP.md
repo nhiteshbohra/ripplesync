@@ -5,27 +5,28 @@ Per xrpl.org "Configure Full History" (Jan 2026): **~39 TB SSD**, +~12 GB/day, N
 
 ## 1. Copy the project to Ubuntu
 ```
-cp -r /mnt/f/downloads/ripple*/ ~/xrpl && cd ~/xrpl      # keep it on the Linux filesystem
+cp -r /mnt/<drive>/<path-to-repo>/ ~/xrpl && cd ~/xrpl      # keep it on the Linux filesystem
 ```
 
 ## 2. Preflight (changes nothing)
 ```
 bash setup/setup_ubuntu.sh check
 ```
-Fix anything it reports (RAM ≥ 64 GB for `huge`, filesystem, free space, systemd in WSL).
+Fix anything it reports (RAM ≥ 64 GB for `huge`, filesystem, free space, systemd in WSL). `DB_PATH` must be a dedicated directory, not `/` or directly under `/` (the script `chown -R`s it). Full history wants 45 TB free (threshold from user notes, not verified).
 
 ## 3. Install + configure the node
 ```
 DB_PATH=/data/xrpld/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
 # testing on a small disk:  HISTORY_MODE=pruned NODE_SIZE=medium bash setup/setup_ubuntu.sh node
 ```
-Uses the official XRPLF apt repo, backs up `/etc/xrpld/xrpld.cfg`, sets `[node_db]` (NuDB), `[ledger_history] full`, `[node_size]`, `[rpc_startup]` log level, and a local admin websocket on `127.0.0.1:6006`. For full history add peers holding full history (docs page above): `FIXED_PEERS="host 51235;host2 51235"`.
+Uses the official XRPLF apt repo, backs up `/etc/xrpld/xrpld.cfg`, sets `[node_db]` (NuDB), `[ledger_history] full`, `[node_size]`, `[rpc_startup]` log level, and a local admin websocket on `127.0.0.1:6006`. `NODE_SIZE` must be one of `tiny small medium large huge`. Links `/etc/opt/ripple/{xrpld,rippled}.cfg` to it; a real file already there is moved to `<name>.bak.<timestamp>` first. For full history add peers holding full history (docs page above): `FIXED_PEERS="host 51235;host2 51235"`.
 
 ## 4. Ingest side
 ```
 MONGO_URI=mongodb://127.0.0.1:27017 bash setup/setup_ubuntu.sh ingest
 ```
-Creates `.venv`, installs deps, writes `.env` (chmod 600), runs the tests, pings Mongo, installs `xrpl-tail.service`.
+Creates `.venv`, installs deps (`requirements.txt`, runtime + test), writes `.env` (chmod 600; without `MONGO_URI` set you are asked, input hidden), runs the tests, pings Mongo, installs `xrpl-tail.service`. An existing `.env` is kept as is (only re-chmodded to 600; a `MONGO_URI` given on the command line is then ignored, with a warning).
+The service runs as the user who invoked the script (`$SUDO_USER`, else current user) and is not installed if that is root; `Restart=on-failure`, so the `process_status.txt` stop flag (clean exit) keeps it stopped. Run as a normal user with sudo.
 WSL → Windows Mongo: enable `networkingMode=mirrored` in `C:\Users\<you>\.wslconfig` (then `wsl --shutdown`), or use the host IP the script prints and set Mongo `bindIp` + firewall.
 
 ## 5. Watch the node sync, then ingest
@@ -92,7 +93,7 @@ Pruned test node instead: keep `online_delete=2000` and `advisory_delete=0` in `
 ## C. Data directory and start
 ```
 sudo mkdir -p /data/xrpld/nudb
-id xrpld && sudo chown -R xrpld:xrpld /data/xrpld      # service user; check the name with: ps -o user= -C xrpld
+id xrpld && sudo chown -R xrpld:xrpld /data/xrpld/nudb # service user; check the name with: ps -o user= -C xrpld
 sudo systemctl enable --now xrpld
 sudo journalctl -u xrpld -f                            # Ctrl+C to leave
 ```
