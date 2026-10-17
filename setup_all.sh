@@ -13,8 +13,8 @@
 #
 # Usage:
 #   bash setup_all.sh                               # Interactive or standard pruned defaults
-#   HISTORY_MODE=pruned bash setup_all.sh           # Pruned mode (~50 GB disk, syncs in ~20 mins)
-#   HISTORY_MODE=full bash setup_all.sh             # Full history mode (~39 TB disk, months sync)
+#   HISTORY_MODE=pruned bash setup_all.sh           # Pruned mode (expected: tens of GB disk; sync time not measured)
+#   HISTORY_MODE=full bash setup_all.sh             # Full history mode (~39 TB disk per xrpl.org; months to sync)
 # ==============================================================================
 
 set -euo pipefail
@@ -30,6 +30,7 @@ FIXED_PEERS="${FIXED_PEERS:-}"
 MONGO_URI_GIVEN="${MONGO_URI:+1}"
 MONGO_URI="${MONGO_URI:-mongodb://127.0.0.1:27017}"
 FORCE="${FORCE:-0}"
+WARNED=0  # set by warn(); the final banner reports it
 
 # Colors
 CYAN='\033[1;36m'
@@ -40,7 +41,7 @@ NC='\033[0m'
 
 say()  { printf "${CYAN}==>${NC} %s\n" "$*"; }
 ok()   { printf "${GREEN}✔${NC} %s\n" "$*"; }
-warn() { printf "${YELLOW}WARN:${NC} %s\n" "$*" >&2; }
+warn() { WARNED=1; printf "${YELLOW}WARN:${NC} %s\n" "$*" >&2; }
 die()  { printf "${RED}ERROR:${NC} %s\n" "$*" >&2; exit 1; }
 
 need_ok() {
@@ -104,9 +105,9 @@ echo "OS: $PRETTY_NAME | Arch: $(uname -m) | WSL: $(is_wsl && echo yes || echo n
 [ "$(uname -m)" = x86_64 ] || need_ok "Architecture $(uname -m) is not x86_64"
 
 RAM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-echo "System RAM: ${RAM_GB} GB"
-if [ "$HISTORY_MODE" = "full" ] && [ "$RAM_GB" -lt 60 ]; then
-  need_ok "Full history mode with node_size=huge strongly recommends >= 64 GB RAM (detected ${RAM_GB} GB)"
+echo "System RAM: ${RAM_GB} GB (node_size=$NODE_SIZE)"
+if [ "$NODE_SIZE" = huge ] && [ "$RAM_GB" -lt 60 ]; then
+  need_ok "node_size=huge wants 64 GB RAM (detected ${RAM_GB} GB); try NODE_SIZE=large"
 fi
 
 # DB_PATH gets `chown -R`: refuse / and top-level dirs so a typo cannot re-own the system.
@@ -130,8 +131,8 @@ fi
 
 if [ "$HISTORY_MODE" = "full" ]; then
   FREE_TB=$((FREE_GB / 1024))
-  if [ "$FREE_TB" -lt 40 ]; then
-    need_ok "Full history requires ~39 TB SSD/NVMe (detected ~${FREE_TB} TB free). For personal/dev setups, run HISTORY_MODE=pruned instead."
+  if [ "$FREE_TB" -lt 45 ]; then  # 45 TB: ~39 TB (xrpl.org) + growth headroom, per user notes, not verified
+    need_ok "Full history needs ~39 TB SSD/NVMe and grows; this script wants 45 TB free (per user notes, not verified), detected ~${FREE_TB} TB. For personal/dev setups, run HISTORY_MODE=pruned instead."
   fi
   case "$FS_TYPE" in
     ext*) need_ok "NuDB full history single files exceed ext4's 16 TB file limit! You must use an XFS or ZFS volume for DB_PATH." ;;
@@ -153,10 +154,15 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 2/6] Installing MongoDB Community Edition"
 
+CODENAME="${VERSION_CODENAME:-}"  # from /etc/os-release (sourced in Phase 1)
+case "$CODENAME" in
+  focal|jammy|noble) ;;
+  *) die "No MongoDB apt repo configured for Ubuntu codename '${CODENAME:-unknown}' (supported here: focal, jammy, noble). Install MongoDB manually." ;;
+esac
+
 $SUDO apt-get update -y
 $SUDO apt-get install -y curl gnupg lsb-release ca-certificates
 
-CODENAME=$(grep -oP '(?<=VERSION_CODENAME=)[a-z]+' /etc/os-release 2>/dev/null || lsb_release -cs 2>/dev/null || echo "jammy")
 MONGO_VER="7.0"
 if [ "$CODENAME" = "noble" ]; then
   MONGO_VER="8.0"
@@ -340,15 +346,21 @@ fi
 # ------------------------------------------------------------------------------
 # Summary & Next Steps
 # ------------------------------------------------------------------------------
+if [ "$WARNED" = 1 ]; then
+  RESULT="SETUP FINISHED WITH WARNINGS -- read the WARN lines above before relying on it"
+else
+  RESULT="SETUP FINISHED (no warnings; services still need checking, see below)"
+fi
+
 cat << EOF
 
 ====================================================================
-✔ COMPLETE SETUP FINISHED SUCCESSFULLY!
+$RESULT
 ====================================================================
 
-Components Installed & Running:
-  1. MongoDB Community Edition : listening on 127.0.0.1:27017
-  2. Ripple Node (xrpld)       : listening on ws://127.0.0.1:6006
+Components (expected endpoints; not verified by this script):
+  1. MongoDB Community Edition : expected on 127.0.0.1:27017 (check: systemctl status mongod)
+  2. Ripple Node (xrpld)       : expected on ws://127.0.0.1:6006 (check: bash setup/check_node.sh)
   3. Python Environment        : $REPO_DIR/.venv
 
 Next Steps:
@@ -358,8 +370,8 @@ Next Steps:
        # Or view live logs:
        sudo journalctl -u xrpld -f
 
-     (State will go: disconnected -> connected -> syncing -> tracking -> full)
-     (Pruned sync usually takes 15-25 minutes).
+     (Expected states: disconnected -> connected -> syncing -> tracking -> full)
+     (Sync time is not measured yet; check progress with check_node.sh.)
 
   2. Once the node reports complete_ledgers, test backfill:
        source .venv/bin/activate

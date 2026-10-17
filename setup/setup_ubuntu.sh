@@ -67,7 +67,8 @@ preflight() {
   fs=$(stat -f -c %T "$probe"); free_tb=$(df -BG --output=avail "$probe" | tail -1 | tr -dc 0-9); free_tb=$((free_tb/1024))
   echo "DB path: $DB_PATH   filesystem: $fs   free: ~${free_tb} TB"
   if [ "$HISTORY_MODE" = full ]; then
-    [ "$free_tb" -ge 45 ] || need_ok "full history needs ~39 TB SSD and grows ~12 GB/day; only ~${free_tb} TB free"
+    # 45 TB: ~39 TB (xrpl.org) + growth headroom, per user notes, not verified
+    [ "$free_tb" -ge 45 ] || need_ok "full history needs ~39 TB SSD and grows ~12 GB/day; this script wants 45 TB free (per user notes, not verified), only ~${free_tb} TB free"
     case "$fs" in ext*) need_ok "NuDB files exceed ext4's 16 TB file limit: use XFS or ZFS for DB_PATH" ;; esac
   fi
   if is_wsl; then
@@ -122,6 +123,7 @@ install_node() {
 
 setup_ingest() {
   say "Python environment in $REPO_DIR/.venv"
+  $SUDO apt-get -y update
   $SUDO apt-get -y install python3 python3-venv python3-pip
   [ -d "$REPO_DIR/.venv" ] || python3 -m venv "$REPO_DIR/.venv"
   "$REPO_DIR/.venv/bin/pip" install -q --upgrade pip
