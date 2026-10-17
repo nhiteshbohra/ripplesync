@@ -238,9 +238,9 @@ if [ ! -d "$REPO_DIR/.venv" ]; then
   python3 -m venv "$REPO_DIR/.venv"
 fi
 
-say "Installing dependencies from requirements-dev.txt..."
+say "Installing dependencies from requirements.txt..."
 "$REPO_DIR/.venv/bin/pip" install -q --upgrade pip
-"$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements-dev.txt"
+"$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt"
 
 # Configure .env
 if [ ! -f "$REPO_DIR/.env" ]; then

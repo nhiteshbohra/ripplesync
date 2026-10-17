@@ -1,3 +1,7 @@
-pymongo>=4.8,<4.11
-python-dotenv>=1.0
-websockets>=13
+# Runtime
+pymongo>=4.8,<4.11        # cap: mongomock 4.3.0 (latest) breaks on pymongo>=4.11 (ReplaceOne passes sort=); known pymongo advisories (fixed in 4.18.2) do not affect our usage: no CSFLE/GridFS, operator-supplied URI
+python-dotenv>=1.2.2,<2   # 1.2.2 fixes PYSEC-2026-2270
+websockets>=13,<18        # websockets.asyncio.client.connect(open_timeout=, max_size=) exists from 13.0
+# Tests
+pytest>=8,<10
+mongomock>=4.3,<5

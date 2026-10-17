@@ -104,7 +104,7 @@ setup_ingest() {
   $SUDO apt-get -y install python3 python3-venv python3-pip
   [ -d "$REPO_DIR/.venv" ] || python3 -m venv "$REPO_DIR/.venv"
   "$REPO_DIR/.venv/bin/pip" install -q --upgrade pip
-  "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements-dev.txt"
+  "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt"
 
   if [ ! -f "$REPO_DIR/.env" ]; then
     local uri="${MONGO_URI:-}"
