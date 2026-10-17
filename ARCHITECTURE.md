@@ -12,7 +12,7 @@ WsSource ──▶ ingest_ledger (retry/backoff) ──▶ transform.parse_ledge
                                        (txs → metas → ledger doc LAST, all upserts)
 ```
 Modes:
-- **backfill**: `server_info.complete_ledgers` ∩ requested range → grid-aligned chunks (default 1000 ledgers) → spawn `ProcessPoolExecutor` of N processes, one chunk in flight per process; each runs asyncio with `CONCURRENCY` in-flight ledgers on one ws connection. Finished chunks stored in metadata collection (`backfill_chunk:<s>-<e>`); reruns skip them. A stopped chunk (stop file) ends submission; a dead worker (OOM kill) breaks the pool, backfill stops and counts unfinished chunks as incomplete. Exit code 0 ok, 1 failures/incomplete, 3 node lacks part of the range.
+- **backfill**: `server_info.complete_ledgers` ∩ requested range → grid-aligned chunks (default 1000 ledgers) → spawn `ProcessPoolExecutor` of N processes, one chunk in flight per process; each runs asyncio with `CONCURRENCY` in-flight ledgers on one ws connection. Finished chunks stored in metadata collection (`backfill_chunk:<s>-<e>`); reruns skip them. A stopped chunk (stop file) ends submission; a dead worker (OOM kill) breaks the pool, backfill stops and counts unfinished chunks as incomplete. Workers set up their own logging (spawn children inherit none). CLI exit codes (all commands): 0 ok, 1 failures/incomplete/verify problems, 2 config/usage error or wrong network, 3 node lacks part of the backfill range, 4 node or MongoDB unreachable/error, 130 Ctrl+C; errors print `error: <Type>: <msg>` without a traceback.
 - **tail**: poll `server_info` validated seq, ingest `checkpoint+1..latest`, store checkpoint per ledger. A ledger that failed all retries advances the checkpoint only if it was recorded in the failed collection; otherwise tail holds the checkpoint, backs off and retries it.
 - **retry-failed**: re-ingest ledgers listed in the failed collection, bounded rounds.
 - **verify**: gaps in ledger collection, and tx count ≠ `num_transactions`.
@@ -29,4 +29,4 @@ Modes:
 - Full-history sizing (disk, RAM, NVMe) comes from user-supplied notes, **not verified** against docs; get current numbers before buying hardware.
 - Mongo doc mixes types for `Amount`/`TakerGets`/`TakerPays` (int drops vs object) — inherited from legacy schema.
 - ws messages for big ledgers are several MB; `MAX_MESSAGE_MB` (default 64) must stay above the largest ledger.
-- Untested against a real xrpld/Mongo; spawn-pool scheduling (stop, worker death) is tested with fake chunk workers only, not end-to-end over a ws.
+- Untested against a real xrpld. `tests/test_integration.py` (marker `integration`) runs the real spawn pool against a fake websockets node (`tests/fake_xrpld.py`) and a local MongoDB throwaway DB; it skips when MongoDB is absent or `XRPL_INGEST_NO_INTEGRATION=1`.
