@@ -326,6 +326,19 @@ def test_server_credentials_never_logged_or_stored(caplog):
     assert caplog.messages and not [m for m in caplog.messages if "secret" in m]
 
 
+def test_connect_failed_text_and_logs_carry_no_credentials(caplog):
+    async def connect(url, **_):
+        raise OSError(f"cannot connect to {url}")  # e.g. websockets InvalidURI quotes the URL
+
+    async def go():
+        await make_source(connect, servers=("ws://user:secret@a",)).server_info()
+    with caplog.at_level("DEBUG", logger="xrpl_ingest.source"):
+        with pytest.raises(ConnectFailed) as e:
+            run(go())
+    assert "ws://a" in str(e.value) and "secret" not in str(e.value)
+    assert caplog.messages and not [m for m in caplog.messages if "secret" in m]
+
+
 def test_unhashable_response_id_ignored_not_fatal():
     def handler(req):
         if req["command"] == "ledger":

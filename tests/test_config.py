@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from xrpl_ingest.config import DEFAULT_SERVERS, LOG_FORMAT, Config, setup_logging
+from xrpl_ingest.config import DEFAULT_SERVERS, LOG_FORMAT, Config, redact_url, setup_logging
 from xrpl_ingest.errors import ConfigError
 
 BASE = {"MONGO_URI": "mongodb://localhost:27017"}
@@ -84,6 +84,23 @@ def test_repr_hides_mongo_uri():
     c = Config.from_env({"MONGO_URI": "mongodb://admin:hunter2@db.example:27017"})
     assert "hunter2" not in repr(c) and "db.example" not in repr(c)
     assert c.mongo_uri.endswith("@db.example:27017")
+
+
+def test_repr_redacts_server_credentials():
+    c = Config(mongo_uri="mongodb://x", servers=("ws://user:pw123@a:6006", "wss://b"))
+    assert "pw123" not in repr(c) and "user" not in repr(c)
+    assert "'ws://a:6006', 'wss://b'" in repr(c) and repr(c).startswith("Config(db_name=")
+    assert c.servers[0] == "ws://user:pw123@a:6006"  # the real value is untouched
+
+
+@pytest.mark.parametrize("text,shown", [
+    ("ws://u:p@ss@host/x", "ws://host/x"),  # unencoded '@' in the password
+    ("all servers failed: cannot reach ws://u:secret@a:6006 (refused)",
+     "all servers failed: cannot reach ws://a:6006 (refused)"),
+    ("no creds ws://a and mongodb://h", "no creds ws://a and mongodb://h"),
+])
+def test_redact_url_in_urls_and_messages(text, shown):
+    assert redact_url(text) == shown
 
 
 def test_network_check_can_be_disabled():

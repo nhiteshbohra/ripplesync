@@ -6,13 +6,20 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Mapping, Optional
 
 from .errors import ConfigError
 
 DEFAULT_SERVERS = ("ws://127.0.0.1:6006",)
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s]*@", re.IGNORECASE)
+
+
+def redact_url(text: str) -> str:
+    """Drop `user:pass@` from every URL in `text` (one URL, or a message quoting URLs):
+    ws://user:pass@host:6006 -> ws://host:6006. For logs, errors and stored reasons."""
+    return _USERINFO.sub(r"\1", text)
 
 
 def setup_logging(level: str) -> None:
@@ -47,6 +54,16 @@ class Config:
 
     process_status_file: str = "process_status.txt"
     log_level: str = "INFO"
+
+    def __repr__(self) -> str:  # mongo_uri hidden, server credentials redacted
+        shown = []
+        for f in fields(self):
+            if f.repr:
+                v = getattr(self, f.name)
+                if f.name == "servers":
+                    v = tuple(redact_url(s) for s in v)
+                shown.append(f"{f.name}={v!r}")
+        return f"Config({', '.join(shown)})"
 
     @staticmethod
     def from_env(env: Optional[Mapping[str, str]] = None) -> "Config":

@@ -7,9 +7,8 @@ import json
 import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
-from urllib.parse import urlsplit
 
-from .config import Config
+from .config import Config, redact_url
 from .errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
                      RpcError, TransientError)
 from .fetcher import RetryPolicy
@@ -19,12 +18,6 @@ log = logging.getLogger(__name__)
 API_VERSION = 2
 
 ConnectFn = Callable[..., Awaitable[Any]]
-
-
-def redact_url(url: str) -> str:
-    """ws://user:pass@host:6006 -> ws://host:6006, for logs and stored failure reasons."""
-    parts = urlsplit(url)
-    return parts._replace(netloc=parts.netloc.rpartition("@")[2]).geturl()
 
 
 async def _default_connect(url: str, *, timeout: float, max_size: int):
@@ -126,13 +119,13 @@ class WsSource:
                 except Exception as e:  # noqa: BLE001 - any connect failure means try again
                     last = e
                     log.warning("connect to %s failed (attempt %d/%d): %s",
-                                redact_url(url), attempt + 1, self.connect_retries, e)
+                                redact_url(url), attempt + 1, self.connect_retries, redact_url(str(e)))
                     await self._drop(conn)
                     if attempt < self.connect_retries - 1:
                         await self._sleep(self._backoff(attempt))
         if mismatched == len(self.servers):  # permanent: retrying cannot change the network
-            raise NetworkMismatch(f"every server is on the wrong network: {last}")
-        raise ConnectFailed(f"all servers failed: {last}")
+            raise NetworkMismatch(redact_url(f"every server is on the wrong network: {last}"))
+        raise ConnectFailed(redact_url(f"all servers failed: {last}"))  # e may quote the URL
 
     def _start(self, ws: Any, url: str) -> _Conn:
         conn = _Conn(ws, url)
