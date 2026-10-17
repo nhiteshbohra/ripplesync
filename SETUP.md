@@ -40,6 +40,7 @@ sudo systemctl enable --now xrpl-tail                        # live ledgers
 ```
 Retry gaps: `python -m xrpl_ingest retry-failed`.
 
+- **Tail after a trial backfill:** with no checkpoint yet, `tail` resumes after the highest stored ledger only if that is at most 1000 ledgers behind the node. Further behind, it starts at the current ledger and logs the `backfill --start … --end …` command that fills the hole.
 - **`.env`** is read from the directory you run the command in, so `cd` to the repo first. The systemd unit sets `WorkingDirectory=` to the repo for this.
 - **Graceful stop:** `echo current_process=0 > process_status.txt`, or SIGTERM (`systemctl stop xrpl-tail`, `kill <pid>`; Linux only, on Windows use the file). In-flight work finishes, nothing new starts.
 - **Exit codes** (all commands): `0` ok · `1` some ledgers failed, a backfill/retry stopped early, or verify found problems · `2` config/usage error (incl. node on the wrong network) · `3` backfill had no failures but the node lacks part of the range · `4` node or MongoDB unreachable / error · `130` Ctrl+C.
