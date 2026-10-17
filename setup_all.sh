@@ -156,7 +156,7 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 2/6] Installing MongoDB Community Edition"
 
-CODENAME="${VERSION_CODENAME:-}"  # from /etc/os-release (sourced in Phase 1)
+CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"  # /etc/os-release (Phase 1); derivatives (Mint, Pop!_OS) set UBUNTU_CODENAME
 case "$CODENAME" in
   focal|jammy|noble) ;;
   *) die "No MongoDB apt repo configured for Ubuntu codename '${CODENAME:-unknown}' (supported here: focal, jammy, noble). Install MongoDB manually." ;;
