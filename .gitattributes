@@ -1,0 +1,4 @@
+# Keep shell and Python sources LF everywhere (core.autocrlf=true on Windows would
+# otherwise check them out as CRLF, which breaks bash on Ubuntu).
+*.sh text eol=lf
+*.py text eol=lf
