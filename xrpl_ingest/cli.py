@@ -23,7 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="xrpl_ingest")
     sub = p.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser("backfill", help="fetch historical ledgers (resumable)")
+    b = sub.add_parser(
+        "backfill", help="fetch historical ledgers (resumable)",
+        epilog="exit codes: 0 = all requested ledgers stored; 1 = some ledgers failed or the run "
+               "stopped early; 2 = config error; 3 = no failures, but the node lacks some "
+               "requested ledgers (see its complete_ledgers); 130 = interrupted")
     b.add_argument("--start", type=int, default=FIRST_LEDGER)
     b.add_argument("--end", type=int, default=None, help="default: node's latest validated ledger")
 
@@ -59,8 +63,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.command == "backfill":
-            summary = run_backfill(cfg, args.start, args.end)
-            return 1 if summary["ledgers_failed"] or summary["chunks_incomplete"] else 0
+            return backfill_exit_code(run_backfill(cfg, args.start, args.end))
 
         store = MongoStore.from_config(cfg)
         try:
@@ -80,6 +83,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         return 130
     return 2
+
+
+def backfill_exit_code(summary: dict) -> int:
+    """1 for failed ledgers or incomplete chunks, else 3 if the node lacked part of the range."""
+    if summary["ledgers_failed"] or summary["chunks_incomplete"]:
+        return 1
+    return 3 if summary["unavailable_ranges"] else 0
 
 
 async def _run_tail(cfg: Config, store: MongoStore, stop) -> int:
