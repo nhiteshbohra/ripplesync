@@ -60,6 +60,10 @@ fi
 is_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
 has_systemd() { [ -d /run/systemd/system ]; }
 
+# check_db_path / check_db_owner: DB_PATH gets `chown -R`, refuse system dirs and foreign data.
+# shellcheck source=setup/db_path_guard.sh
+. "$REPO_DIR/setup/db_path_guard.sh"
+
 # Point LINK at TARGET; an existing real file is moved aside first, never overwritten.
 link_cfg() {
   local target="$1" link="$2" bak
@@ -110,10 +114,8 @@ if [ "$NODE_SIZE" = huge ] && [ "$RAM_GB" -lt 60 ]; then
   need_ok "node_size=huge wants 64 GB RAM (detected ${RAM_GB} GB); try NODE_SIZE=large"
 fi
 
-# DB_PATH gets `chown -R`: refuse / and top-level dirs so a typo cannot re-own the system.
-case "$(dirname "$(realpath -m -- "$DB_PATH")")" in
-  /|//) die "DB_PATH=$DB_PATH is / or directly under /; use a dedicated subdirectory, e.g. /data/xrpld/nudb" ;;
-esac
+# DB_PATH gets `chown -R`: refuse system dirs (and top-level ones) so a typo cannot re-own the system.
+check_db_path
 
 PROBE_DIR="$DB_PATH"
 while [ ! -e "$PROBE_DIR" ]; do PROBE_DIR="$(dirname "$PROBE_DIR")"; done
@@ -214,6 +216,7 @@ has_systemd && $SUDO systemctl stop xrpld 2>/dev/null || true
 say "Configuring storage directory at $DB_PATH..."
 $SUDO mkdir -p "$DB_PATH"
 if id xrpld >/dev/null 2>&1; then
+  check_db_owner
   $SUDO chown -R xrpld:xrpld "$DB_PATH"  # parent left as is: xrpld only needs to traverse it
 else
   warn "User 'xrpld' not found yet; make sure permissions match the service user."

@@ -31,12 +31,9 @@ is_wsl()     { grep -qi microsoft /proc/version 2>/dev/null; }
 has_systemd(){ [ -d /run/systemd/system ]; }
 SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 
-# DB_PATH gets `chown -R`: refuse / and top-level dirs so a typo cannot re-own the system.
-check_db_path() {
-  case "$(dirname "$(realpath -m -- "$DB_PATH")")" in
-    /|//) die "DB_PATH=$DB_PATH is / or directly under /; use a dedicated subdirectory, e.g. /data/xrpld/nudb" ;;
-  esac
-}
+# check_db_path / check_db_owner: DB_PATH gets `chown -R`, refuse system dirs and foreign data.
+# shellcheck source=setup/db_path_guard.sh
+. "$REPO_DIR/setup/db_path_guard.sh"
 
 # Point LINK at TARGET; an existing real file is moved aside first, never overwritten.
 link_cfg() {
@@ -96,7 +93,9 @@ install_node() {
 
   say "Preparing DB dir $DB_PATH"
   $SUDO mkdir -p "$DB_PATH"
-  if id xrpld >/dev/null 2>&1; then $SUDO chown -R xrpld:xrpld "$DB_PATH"  # parent left as is: xrpld only needs to traverse it
+  if id xrpld >/dev/null 2>&1; then
+    check_db_owner
+    $SUDO chown -R xrpld:xrpld "$DB_PATH"  # parent left as is: xrpld only needs to traverse it
   else warn "no 'xrpld' user found; fix ownership of $DB_PATH to match the service user"; fi
 
   say "Editing $CFG (backup made; history=$HISTORY_MODE)"
