@@ -77,6 +77,20 @@ class MongoStore:
 
     def set_checkpoint(self, index: int) -> None:
         """Never moves back ($max), e.g. if an older tail process is still running."""
+        doc = self.meta.find_one({"_id": LAST_LEDGER_ID}, {"index": 1})
+        old = doc.get("index") if doc else None
+        if old is not None and (isinstance(old, bool) or not isinstance(old, (int, float))):
+            # legacy doc storing a string: in BSON order it sorts above every number, so
+            # $max would never move it again. Rewrite it as a number once.
+            try:
+                legacy = int(old)
+            except (TypeError, ValueError):
+                legacy = 0
+            log.warning("checkpoint index %r is not a number (legacy document); rewriting as %d",
+                        old, max(index, legacy))
+            self.meta.update_one({"_id": LAST_LEDGER_ID},
+                                 {"$set": {"index": max(index, legacy), "updated_at": _now()}})
+            return
         self.meta.update_one({"_id": LAST_LEDGER_ID},
                              {"$max": {"index": index}, "$set": {"updated_at": _now()}},
                              upsert=True)

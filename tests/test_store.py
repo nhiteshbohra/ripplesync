@@ -34,6 +34,25 @@ def test_checkpoint_roundtrip(store):
     assert store.get_checkpoint() == 51
 
 
+def test_legacy_string_checkpoint_is_converted_once(store, caplog):
+    """A legacy doc with index "100" (a string) sorts above every number in BSON, so $max
+    alone would never move it again: tail would restart from 100 forever."""
+    store.meta.insert_one({"_id": LAST_LEDGER_ID, "index": "100"})
+    assert store.get_checkpoint() == 100
+    with caplog.at_level("WARNING", logger="xrpl_ingest.store"):
+        store.set_checkpoint(150)
+        store.set_checkpoint(160)
+    assert store.get_checkpoint() == 160
+    assert store.meta.find_one({"_id": LAST_LEDGER_ID})["index"] == 160  # stored as a number
+    assert len([m for m in caplog.messages if "not a number" in m]) == 1
+
+
+def test_legacy_string_checkpoint_ahead_is_kept(store):
+    store.meta.insert_one({"_id": LAST_LEDGER_ID, "index": "500"})
+    store.set_checkpoint(150)
+    assert store.meta.find_one({"_id": LAST_LEDGER_ID})["index"] == 500  # never moves back
+
+
 def test_highest_ledger(store):
     assert store.highest_ledger() == 0
     for idx in (7, 30, 12):
