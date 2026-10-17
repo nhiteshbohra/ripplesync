@@ -9,9 +9,14 @@ from dotenv import load_dotenv
 from xrpl_ingest.source import WsSource
 load_dotenv(os.path.join(os.getcwd(), ".env"))
 
+# Same parsing as xrpl_ingest/config.py (Config.from_env needs MONGO_URI, which this check does not).
+servers = [u for u in re.split(r"[,\s]+", (os.environ.get("SERVERS") or "").strip("\"' ")) if u]
+net_raw = (os.environ.get("EXPECTED_NETWORK_ID") or "").strip().lower()
+network_id = None if net_raw in ("none", "off", "any") else int(net_raw or 0)
+
 async def main():
-    s = WsSource([u for u in re.split(r"[,\s]+", os.environ.get("SERVERS", "ws://127.0.0.1:6006")) if u],
-                 request_timeout=10, connect_retries=1)
+    s = WsSource(servers or ["ws://127.0.0.1:6006"], request_timeout=10, connect_retries=1,
+                 expected_network_id=network_id)
     try:
         info = await s.server_info()
     finally:
