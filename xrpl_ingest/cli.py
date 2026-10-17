@@ -102,6 +102,9 @@ async def _run_retry(cfg: Config, store: MongoStore, rounds: int, stop) -> int:
 
 
 def _verify(store: MongoStore, start: int, end: int) -> int:
+    if start > end:
+        print(f"verify: --start ({start}) must be <= --end ({end})", file=sys.stderr)
+        return 2
     bad = 0
     for a in range(start, end + 1, VERIFY_WINDOW):
         b = min(end, a + VERIFY_WINDOW - 1)

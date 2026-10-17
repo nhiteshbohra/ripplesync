@@ -99,6 +99,12 @@ def test_record_failure_error_is_swallowed(store, monkeypatch):
     monkeypatch.setattr(store, "record_failure", boom)
     r = ingest(FakeSource({100: [RpcError("lgrNotFound")]}), store)
     assert not r.ok  # no exception escaped
+    assert not r.recorded
+
+
+def test_recorded_failure_is_flagged_recorded(store):
+    r = ingest(FakeSource({100: [RpcError("lgrNotFound")]}), store)
+    assert not r.ok and r.recorded
 
 
 def test_clear_failure_on_retry_success(store):

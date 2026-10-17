@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 
 import pytest
+from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, FakeSource, make_result, no_sleep
 from xrpl_ingest.backfill import process_chunk, retry_failed, run_backfill
@@ -140,3 +141,21 @@ def test_retry_failed_honours_stop(store):
     src = FakeSource()
     remaining = run(retry_failed(src, store, FAST_RETRY, stop_check=lambda: True, sleep=no_sleep))
     assert remaining == 1 and src.calls == []
+
+
+def test_chunk_with_unrecorded_failure_is_not_marked_done(store, monkeypatch):
+    def boom(*a):
+        raise AutoReconnect("down")
+    monkeypatch.setattr(store, "record_failure", boom)
+    r = chunk_run(FakeSource({13: [RpcError("lgrNotFound")]}), store, (10, 19))
+    assert (r.ok, r.failed, r.unrecorded) == (9, 1, 1)
+    assert store.done_chunks(0, 100) == set()  # next backfill redoes the chunk
+
+
+def test_mark_chunk_done_error_does_not_raise_and_leaves_chunk_unmarked(store, monkeypatch):
+    def boom(*a):
+        raise AutoReconnect("down")
+    monkeypatch.setattr(store, "mark_chunk_done", boom)
+    r = chunk_run(FakeSource(), store, (10, 19))
+    assert r.ok == 10 and r.failed == 0
+    assert store.done_chunks(0, 100) == set()

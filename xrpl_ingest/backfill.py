@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
+from pymongo.errors import PyMongoError
+
 from .config import Config
 from .constants import FIRST_LEDGER
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
@@ -24,6 +26,7 @@ class ChunkResult:
     chunk: Range
     ok: int = 0
     failed: int = 0
+    unrecorded: int = 0  # failures not in the failed collection; chunk is then not marked done
     completed: bool = True  # False when stopped early; such chunks are not marked done
 
 
@@ -47,10 +50,19 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
                 res.ok += 1
             else:
                 res.failed += 1
+                if not r.recorded:
+                    res.unrecorded += 1
 
     await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
-    if res.completed:
-        await asyncio.to_thread(store.mark_chunk_done, chunk[0], chunk[1], res.ok, res.failed)
+    if res.unrecorded:
+        log.error("chunk %d-%d: %d failed ledgers could not be recorded; chunk left unmarked so "
+                  "the next backfill redoes it", chunk[0], chunk[1], res.unrecorded)
+    elif res.completed:
+        try:
+            await asyncio.to_thread(store.mark_chunk_done, chunk[0], chunk[1], res.ok, res.failed)
+        except PyMongoError as e:
+            log.error("chunk %d-%d: could not mark done (%s); the next backfill redoes it",
+                      chunk[0], chunk[1], e)
     return res
 
 

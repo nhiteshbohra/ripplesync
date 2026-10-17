@@ -30,6 +30,7 @@ class IngestResult:
     ok: bool
     num_transactions: int = 0
     error: Optional[str] = None
+    recorded: bool = True  # False: failed AND missing from the failed collection
 
 
 async def ingest_ledger(source: Any, store: Any, index: int, retry: RetryPolicy, *,
@@ -57,4 +58,5 @@ async def ingest_ledger(source: Any, store: Any, index: int, retry: RetryPolicy,
         await asyncio.to_thread(store.record_failure, index, last_error)
     except Exception as e:  # noqa: BLE001 - store is down; ledger stays unrecorded
         log.error("ledger %d: could not record failure (%s); rerun backfill to cover it", index, e)
+        return IngestResult(index, False, error=last_error, recorded=False)
     return IngestResult(index, False, error=last_error)
