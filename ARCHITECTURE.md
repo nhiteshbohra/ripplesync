@@ -13,7 +13,7 @@ WsSource ──▶ ingest_ledger (retry/backoff) ──▶ transform.parse_ledge
 ```
 Modes:
 - **backfill**: `server_info.complete_ledgers` ∩ requested range → grid-aligned chunks (default 1000 ledgers) → spawn `Pool` of N processes; each runs asyncio with `CONCURRENCY` in-flight ledgers on one ws connection. Finished chunks stored in metadata collection (`backfill_chunk:<s>-<e>`); reruns skip them.
-- **tail**: poll `server_info` validated seq, ingest `checkpoint+1..latest`, store checkpoint per ledger.
+- **tail**: poll `server_info` validated seq, ingest `checkpoint+1..latest`, store checkpoint per ledger. A ledger that failed all retries advances the checkpoint only if it was recorded in the failed collection; otherwise tail holds the checkpoint, backs off and retries it.
 - **retry-failed**: re-ingest ledgers listed in the failed collection, bounded rounds.
 - **verify**: gaps in ledger collection, and tx count ≠ `num_transactions`.
 
