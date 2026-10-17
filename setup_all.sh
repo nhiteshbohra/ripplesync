@@ -308,24 +308,33 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 6/6] Registering Background Ingest Service"
 
-if has_systemd; then
+TAIL_USER="${SUDO_USER:-$(id -un)}"
+if ! has_systemd; then
+  :
+elif [ "$TAIL_USER" = root ]; then
+  warn "Not installing xrpl-tail.service: it would run as root. Re-run as a normal user (with sudo) to install it."
+else
+  # ExecStart path is quoted because REPO_DIR may contain spaces (systemd.syntax "Quoting");
+  # WorkingDirectory= takes one path, spaces allowed unquoted. Neither verified on a real systemd yet.
+  # Restart=on-failure: tail exits 0 on the process_status.txt stop flag and must stay stopped.
   $SUDO tee /etc/systemd/system/xrpl-tail.service >/dev/null <<UNIT
 [Unit]
 Description=XRPL ledger live tail into MongoDB
+Wants=network-online.target
 After=network-online.target xrpld.service mongod.service
 
 [Service]
-User=$(id -un)
+User=$TAIL_USER
 WorkingDirectory=$REPO_DIR
-ExecStart=$REPO_DIR/.venv/bin/python -m xrpl_ingest tail
-Restart=always
+ExecStart="$REPO_DIR/.venv/bin/python" -m xrpl_ingest tail
+Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 UNIT
   $SUDO systemctl daemon-reload
-  ok "Registered /etc/systemd/system/xrpl-tail.service"
+  ok "Registered /etc/systemd/system/xrpl-tail.service (User=$TAIL_USER)"
 fi
 
 # ------------------------------------------------------------------------------

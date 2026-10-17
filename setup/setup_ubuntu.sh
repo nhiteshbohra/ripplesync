@@ -165,18 +165,25 @@ except Exception as e:
 PY
   ) || warn "MongoDB not reachable yet"
 
-  if has_systemd; then
-    say "Installing xrpl-tail.service (live follow; starts once node has synced)"
+  local tail_user="${SUDO_USER:-$(id -un)}"
+  if has_systemd && [ "$tail_user" = root ]; then
+    warn "not installing xrpl-tail.service: it would run as root; re-run 'ingest' as a normal user (with sudo)"
+  elif has_systemd; then
+    say "Installing xrpl-tail.service (live follow; starts once node has synced; User=$tail_user)"
+    # ExecStart path quoted: REPO_DIR may contain spaces (systemd.syntax "Quoting"); WorkingDirectory=
+    # takes one path, spaces allowed unquoted. Not verified on a real systemd yet.
+    # Restart=on-failure: tail exits 0 on the process_status.txt stop flag and must stay stopped.
     $SUDO tee /etc/systemd/system/xrpl-tail.service >/dev/null <<UNIT
 [Unit]
 Description=XRPL ledger tail into MongoDB
+Wants=network-online.target
 After=network-online.target xrpld.service
 
 [Service]
-User=$(id -un)
+User=$tail_user
 WorkingDirectory=$REPO_DIR
-ExecStart=$REPO_DIR/.venv/bin/python -m xrpl_ingest tail
-Restart=always
+ExecStart="$REPO_DIR/.venv/bin/python" -m xrpl_ingest tail
+Restart=on-failure
 RestartSec=10
 
 [Install]
