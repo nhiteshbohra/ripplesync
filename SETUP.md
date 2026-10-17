@@ -19,7 +19,7 @@ Fix anything it reports (RAM ≥ 64 GB for `huge`, filesystem, free space, syste
 DB_PATH=/data/xrpld/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
 # testing on a small disk:  HISTORY_MODE=pruned NODE_SIZE=medium bash setup/setup_ubuntu.sh node
 ```
-Uses the official XRPLF apt repo, backs up `/etc/xrpl/xrpld.cfg`, sets `[node_db]` (NuDB), `[ledger_history] full`, `[node_size]`, `[rpc_startup]` log level, and a local admin websocket on `127.0.0.1:6006`. For full history add peers holding full history (docs page above): `FIXED_PEERS="host 51235;host2 51235"`.
+Uses the official XRPLF apt repo, backs up `/etc/xrpld/xrpld.cfg`, sets `[node_db]` (NuDB), `[ledger_history] full`, `[node_size]`, `[rpc_startup]` log level, and a local admin websocket on `127.0.0.1:6006`. For full history add peers holding full history (docs page above): `FIXED_PEERS="host 51235;host2 51235"`.
 
 ## 4. Ingest side
 ```
@@ -58,8 +58,8 @@ sudo apt -y update && sudo apt -y install xrpld
 systemctl status xrpld.service
 ```
 
-## B. Configure (`/etc/xrpl/xrpld.cfg`)
-Stop first: `sudo systemctl stop xrpld`. Back up: `sudo cp /etc/xrpl/xrpld.cfg /etc/xrpl/xrpld.cfg.bak`. Edit with `sudo nano /etc/xrpl/xrpld.cfg`. Each stanza name appears **once**; replace the packaged one, don't add a second.
+## B. Configure (`/etc/xrpld/xrpld.cfg`)
+Stop first: `sudo systemctl stop xrpld`. Back up: `sudo cp /etc/xrpld/xrpld.cfg /etc/xrpld/xrpld.cfg.bak`. Edit with `sudo nano /etc/xrpld/xrpld.cfg`. Each stanza name appears **once**; replace the packaged one, don't add a second.
 
 ```
 [node_db]
@@ -96,7 +96,7 @@ id xrpld && sudo chown -R xrpld:xrpld /data/xrpld      # service user; check the
 sudo systemctl enable --now xrpld
 sudo journalctl -u xrpld -f                            # Ctrl+C to leave
 ```
-Without systemd (plain WSL): `xrpld --conf /etc/xrpl/xrpld.cfg`.
+Without systemd (plain WSL): `xrpld --conf /etc/xrpld/xrpld.cfg`.
 
 ## D. Check it works
 ```

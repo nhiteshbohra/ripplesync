@@ -5,7 +5,7 @@
 # This script sets up everything from scratch on Ubuntu (20.04 / 22.04 / 24.04 / WSL2):
 #   1. System preflight checks
 #   2. Installs official MongoDB Community Edition 7.0/8.0 & starts service
-#   3. Installs official XRPLF Ripple Node (xrpld), configures /etc/xrpl/xrpld.cfg & starts service
+#   3. Installs official XRPLF Ripple Node (xrpld), configures /etc/xrpld/xrpld.cfg & starts service
 #   4. Sets up Python 3 virtual environment (.venv) and installs all dependencies
 #   5. Configures .env with local Mongo & WebSocket admin connections
 #   6. Runs test suite to verify full setup health
@@ -194,8 +194,8 @@ else
   warn "User 'xrpld' not found yet; make sure permissions match the service user."
 fi
 
-say "Configuring /etc/xrpl/xrpld.cfg (Mode: $HISTORY_MODE, Size: $NODE_SIZE, WS Port: 6006)..."
-$SUDO mkdir -p /etc/xrpl /etc/opt/ripple
+say "Configuring /etc/xrpld/xrpld.cfg (Mode: $HISTORY_MODE, Size: $NODE_SIZE, WS Port: 6006)..."
+$SUDO mkdir -p /etc/xrpld /etc/opt/ripple
 PEER_ARGS=()
 if [ -n "$FIXED_PEERS" ]; then
   IFS=';' read -ra PARTS <<< "$FIXED_PEERS"
@@ -204,14 +204,14 @@ if [ -n "$FIXED_PEERS" ]; then
   done
 fi
 
-$SUDO python3 "$REPO_DIR/setup/edit_cfg.py" /etc/xrpl/xrpld.cfg \
+$SUDO python3 "$REPO_DIR/setup/edit_cfg.py" /etc/xrpld/xrpld.cfg \
   --db-path "$DB_PATH" \
   --history "$HISTORY_MODE" \
   --node-size "$NODE_SIZE" \
   "${PEER_ARGS[@]}"
 
-$SUDO ln -sf /etc/xrpl/xrpld.cfg /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
-$SUDO ln -sf /etc/xrpl/xrpld.cfg /etc/opt/ripple/rippled.cfg 2>/dev/null || true
+$SUDO ln -sf /etc/xrpld/xrpld.cfg /etc/opt/ripple/xrpld.cfg 2>/dev/null || true
+$SUDO ln -sf /etc/xrpld/xrpld.cfg /etc/opt/ripple/rippled.cfg 2>/dev/null || true
 
 if has_systemd; then
   say "Starting xrpld service..."
@@ -220,7 +220,7 @@ if has_systemd; then
   sleep 3
   $SUDO systemctl is-active --quiet xrpld && ok "Ripple node (xrpld) service is active and running" || warn "xrpld started with warnings"
 else
-  warn "No systemd: start xrpld manually with 'xrpld --conf /etc/xrpl/xrpld.cfg &'"
+  warn "No systemd: start xrpld manually with 'xrpld --conf /etc/xrpld/xrpld.cfg &'"
 fi
 
 ok "Ripple node installed and configured"

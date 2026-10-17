@@ -29,3 +29,11 @@ coverage.xml
 .DS_Store
 Thumbs.db
 .vscode/
+
+universal-code-audit-prompt.md
+TODO.md
+SESSION_LOG.md
+git-claude-attribution-audit.md
+DECISIONS.md
+CLAUDE.md
+ai-context-discipline-prompt.md

@@ -1,0 +1,4 @@
+CURRENT_PROCESS=0
+
+# enter 1 to continue execution
+# enter 0 to stop

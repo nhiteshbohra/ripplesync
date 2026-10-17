@@ -19,7 +19,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_PATH="${DB_PATH:-/var/lib/xrpld/db/nudb}"
 HISTORY_MODE="${HISTORY_MODE:-full}"
 NODE_SIZE="${NODE_SIZE:-huge}"
-CFG=/etc/xrpl/xrpld.cfg
+CFG=/etc/xrpld/xrpld.cfg
 FORCE="${FORCE:-0}"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

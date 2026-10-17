@@ -1,0 +1,349 @@
+import asyncio
+import logging
+import aiohttp
+from datetime import datetime, timezone
+import sys
+from typing import List, Dict, Any, Tuple
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError, PyMongoError
+import time
+import multiprocessing # Import multiprocessing module
+
+# --- Configuration ---
+BLOCKCHAIR_API_BASE_URL = "https://api.blockchair.com/zcash"
+# Blockchair API has a rate limit of 10 requests per second.
+# We'll use a semaphore to limit concurrency and avoid hitting it too hard.
+CONCURRENCY_LIMIT = 5 # Number of concurrent API requests for both blocks and transactions
+
+# MongoDB Configuration
+MONGO_URI = "mongodb://localhost:27017/" # Ensure MongoDB is running on this URI
+DB_NAME = "zcash_data"
+BLOCK_COLLECTION = "blocks"
+TX_COLLECTION = "transactions" # This collection will now be populated with full transaction details
+FAILED_BLOCK_COLLECTION = "failed_blocks"
+
+# --- Logging Setup ---
+# Configure logging for multiprocessing, ensuring logs go to stdout from all processes
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(processName)s - %(message)s', # Added processName
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging() # Initialize logger globally for the main process
+
+# --- MongoDB Manager Class ---
+class MongoDBManager:
+    """Manages MongoDB connections and data operations."""
+    def __init__(self, uri: str, db_name: str):
+        self.uri = uri
+        self.db_name = db_name
+        self.client = None
+        self.db = None
+
+    def connect(self):
+        """Establishes a connection to MongoDB."""
+        try:
+            # Add a timeout to connection to prevent indefinite hangs
+            self.client = MongoClient(self.uri, serverSelectionTimeoutMS=5000)
+            # The ismaster command is cheap and does not require auth.
+            self.client.admin.command('ismaster')
+            self.db = self.client[self.db_name]
+            logger.info(f"Successfully connected to MongoDB: {self.uri}/{self.db_name}")
+        except PyMongoError as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            raise # Re-raise to ensure process exits if MongoDB connection fails
+
+    def close(self):
+        """Closes the MongoDB connection."""
+        if self.client:
+            self.client.close()
+            logger.info("MongoDB connection closed.")
+
+    async def insert_block_and_transactions(self, block_data: Dict[str, Any], session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
+        """
+        Inserts block data into the blocks collection and its associated
+        full transaction details into the transactions collection.
+        Uses upsert to update existing documents or insert new ones.
+        """
+        if self.db is None:
+            logger.error("MongoDB connection not established. Cannot insert data.")
+            return
+
+        blocks_col = self.db[BLOCK_COLLECTION]
+        tx_col = self.db[TX_COLLECTION]
+
+        try:
+            block_num = block_data.get('block', {}).get('id')
+            if block_num is None:
+                logger.warning(f"Block data missing 'id' (height): {block_data}")
+                return
+
+            # Prepare block document
+            block_doc = block_data.get('block', {})
+            block_doc['_id'] = block_doc.get('id') # Use block 'id' as _id
+            block_doc['fetched_at'] = datetime.now(timezone.utc) # Add timestamp of fetch
+
+            # Extract transaction hashes (as it's a list from the API response)
+            transaction_hashes_list = block_data.get('transactions', [])
+            # Store the list of transaction hashes directly in the block document for quick reference
+            block_doc['transaction_hashes'] = transaction_hashes_list
+
+            # Insert/Update block document
+            await asyncio.to_thread(blocks_col.update_one,
+                                    {'_id': block_doc['_id']},
+                                    {'$set': block_doc},
+                                    upsert=True)
+            logger.info(f"Successfully saved block {block_num} to MongoDB.")
+
+            # --- Fetch and save full transaction details ---
+            if transaction_hashes_list:
+                tx_fetch_tasks = []
+                for tx_hash in transaction_hashes_list:
+                    tx_fetch_tasks.append(fetch_transaction_data(session, tx_hash, semaphore))
+
+                fetched_tx_count = 0
+                failed_tx_count = 0
+                tx_operations = []
+
+                # Run transaction fetch tasks concurrently
+                # asyncio.as_completed yields futures as they complete
+                for future in asyncio.as_completed(tx_fetch_tasks):
+                    tx_hash, tx_details = await future
+                    if tx_details:
+                        # Blockchair transaction dashboard API returns data under 'data' and then the hash
+                        full_tx_data = tx_details.get(tx_hash)
+                        if full_tx_data:
+                            tx_doc = full_tx_data
+                            tx_doc['_id'] = tx_hash # Use transaction hash as _id
+                            tx_doc['block_height'] = block_num # Associate transaction with block 'id'
+                            tx_doc['fetched_at'] = datetime.now(timezone.utc)
+                            tx_operations.append(UpdateOne({'_id': tx_hash}, {'$set': tx_doc}, upsert=True))
+                            fetched_tx_count += 1
+                        else:
+                            logger.warning(f"Transaction {tx_hash} for block {block_num}: No full data found in API response.")
+                            failed_tx_count += 1
+                    else:
+                        logger.warning(f"Transaction {tx_hash} for block {block_num}: Failed to fetch full details.")
+                        failed_tx_count += 1
+
+                if tx_operations:
+                    try:
+                        tx_result = await asyncio.to_thread(tx_col.bulk_write, tx_operations, ordered=False)
+                        logger.info(f"Block {block_num}: Saved {tx_result.upserted_count + tx_result.modified_count} transactions to MongoDB. "
+                                    f"New: {tx_result.upserted_count}, Updated: {tx_result.modified_count}.")
+                    except BulkWriteError as bwe:
+                        logger.error(f"Block {block_num}: BulkWriteError for transactions: {bwe.details}")
+                    except Exception as e:
+                        logger.error(f"Block {block_num}: Error during bulk transaction write: {e}")
+                else:
+                    logger.info(f"Block {block_num}: No transactions to save or all failed to fetch.")
+
+        except PyMongoError as e:
+            logger.error(f"MongoDB operation failed for block {block_num}: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while saving block data: {e}")
+
+    async def log_failed_block(self, block_num: int, reason: str):
+        """Logs a block number that failed to be fetched or processed."""
+        if self.db is None:
+            logger.error("MongoDB connection not established. Cannot log failed block.")
+            return
+
+        failed_col = self.db[FAILED_BLOCK_COLLECTION]
+        try:
+            await asyncio.to_thread(failed_col.update_one,
+                                    {'_id': block_num},
+                                    {'$set': {'block_height': block_num, 'reason': reason,
+                                              'timestamp': datetime.now(timezone.utc)}},
+                                    upsert=True)
+            logger.warning(f"Logged failed block {block_num}: {reason}")
+        except PyMongoError as e:
+            logger.error(f"Failed to log failed block {block_num}: {e}")
+
+# --- Blockchair API Fetcher Functions ---
+async def fetch_block_data(session: aiohttp.ClientSession, block_num: int, semaphore: asyncio.Semaphore) -> Tuple[int, Dict[str, Any] | None]:
+    """
+    Fetches data for a single Zcash block from Blockchair API.
+    Uses a semaphore to limit concurrent requests.
+    """
+    url = f"{BLOCKCHAIR_API_BASE_URL}/dashboards/block/{block_num}"
+    async with semaphore: # Acquire a semaphore lock before making the request
+        try:
+            async with session.get(url, timeout=30) as response:
+                response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+                data = await response.json()
+                if data and 'data' in data and str(block_num) in data['data']:
+                    return block_num, data['data'][str(block_num)]
+                else:
+                    logger.warning(f"Block {block_num}: No data found in API response or unexpected format.")
+                    return block_num, None
+        except aiohttp.ClientError as e:
+            logger.error(f"Block {block_num}: HTTP error during fetch: {e}")
+            return block_num, None
+        except asyncio.TimeoutError:
+            logger.error(f"Block {block_num}: Request timed out.")
+            return block_num, None
+        except Exception as e:
+            logger.error(f"Block {block_num}: An unexpected error occurred during fetch: {e}")
+            return block_num, None
+        finally:
+            # Add a small delay to respect API rate limits, even with semaphore
+            await asyncio.sleep(0.1) # 100ms delay per request, effectively 10 req/sec max
+
+async def fetch_transaction_data(session: aiohttp.ClientSession, tx_hash: str, semaphore: asyncio.Semaphore) -> Tuple[str, Dict[str, Any] | None]:
+    """
+    Fetches data for a single Zcash transaction from Blockchair API.
+    Uses a semaphore to limit concurrent requests.
+    """
+    url = f"{BLOCKCHAIR_API_BASE_URL}/dashboards/transaction/{tx_hash}"
+    async with semaphore: # Acquire a semaphore lock before making the request
+        try:
+            async with session.get(url, timeout=30) as response:
+                response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+                data = await response.json()
+                if data and 'data' in data and tx_hash in data['data']:
+                    return tx_hash, data['data']
+                else:
+                    logger.warning(f"Transaction {tx_hash}: No data found in API response or unexpected format.")
+                    return tx_hash, None
+        except aiohttp.ClientError as e:
+            logger.error(f"Transaction {tx_hash}: HTTP error during fetch: {e}")
+            return tx_hash, None
+        except asyncio.TimeoutError:
+            logger.error(f"Transaction {tx_hash}: Request timed out.")
+            return tx_hash, None
+        except Exception as e:
+            logger.error(f"Transaction {tx_hash}: An unexpected error occurred during fetch: {e}")
+            return tx_hash, None
+        finally:
+            await asyncio.sleep(0.1) # Small delay to respect API rate limits
+
+async def fetch_blocks_in_range(start_block: int, end_block: int, db_manager: MongoDBManager):
+    """
+    Fetches a range of Zcash blocks concurrently and saves them to MongoDB.
+    """
+    logger.info(f"Starting to fetch blocks from {start_block} to {end_block}...")
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+    fetched_block_count = 0
+    failed_block_count = 0
+
+    async with aiohttp.ClientSession() as session:
+        block_fetch_tasks = []
+        for block_num in range(start_block, end_block + 1):
+            block_fetch_tasks.append(fetch_block_data(session, block_num, semaphore))
+
+        # Use a list to store results in order to know which block caused the error
+        results = await asyncio.gather(*block_fetch_tasks, return_exceptions=True)
+
+        for block_num, block_data_or_exc in zip(range(start_block, end_block + 1), results):
+            if isinstance(block_data_or_exc, Exception):
+                logger.error(f"Error fetching block {block_num}: {block_data_or_exc}")
+                await db_manager.log_failed_block(block_num, f"API fetch error: {block_data_or_exc}")
+                failed_block_count += 1
+            elif block_data_or_exc is None:
+                await db_manager.log_failed_block(block_num, "Failed to fetch from API or no data (returned None).")
+                failed_block_count += 1
+            else:
+                block_data = block_data_or_exc[1] # Unpack the tuple (block_num, block_data)
+                if block_data:
+                    try:
+                        # Pass session and semaphore to insert_block_and_transactions for transaction fetching
+                        await db_manager.insert_block_and_transactions(block_data, session, semaphore)
+                        fetched_block_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to process and save block {block_num}: {e}")
+                        await db_manager.log_failed_block(block_num, f"Processing/Saving error: {e}")
+                        failed_block_count += 1
+                else:
+                    await db_manager.log_failed_block(block_num, "Failed to fetch from API or no data.")
+                    failed_block_count += 1
+
+    logger.info(f"Finished fetching blocks. Successfully processed: {fetched_block_count}, Failed: {failed_block_count}.")
+
+
+def worker_process(start_block: int, end_block: int, mongo_uri: str, db_name: str):
+    """
+    Function to be executed by each multiprocessing worker.
+    Each worker will have its own asyncio event loop and MongoDB connection.
+    """
+    global logger # Use the global logger instance
+    logger = setup_logging() # Re-initialize logger for each process to get correct processName
+
+    logger.info(f"Worker process started for blocks {start_block} to {end_block}.")
+    db_manager = MongoDBManager(mongo_uri, db_name)
+    try:
+        db_manager.connect()
+        asyncio.run(fetch_blocks_in_range(start_block, end_block, db_manager))
+    except Exception as e:
+        logger.critical(f"Worker process for blocks {start_block}-{end_block} failed: {e}", exc_info=True)
+    finally:
+        db_manager.close()
+    logger.info(f"Worker process finished for blocks {start_block} to {end_block}.")
+
+
+# --- Main Execution ---
+async def main():
+    # Example: Fetch a larger range of blocks for demonstration
+    START_BLOCK_RANGE = 1000000
+    END_BLOCK_RANGE = 1000100 # Adjust this range as needed for testing
+    NUM_PROCESSES = 4 # Number of parallel processes
+
+    logger.info(f"Starting Zcash data fetching with {NUM_PROCESSES} processes.")
+
+    # Calculate block ranges for each process
+    blocks_per_process = (END_BLOCK_RANGE - START_BLOCK_RANGE + 1) // NUM_PROCESSES
+    remainder = (END_BLOCK_RANGE - START_BLOCK_RANGE + 1) % NUM_PROCESSES
+
+    ranges = []
+    current_start = START_BLOCK_RANGE
+    for i in range(NUM_PROCESSES):
+        current_end = current_start + blocks_per_process - 1
+        if i < remainder: # Distribute remainder blocks to the first 'remainder' processes
+            current_end += 1
+        if current_start <= current_end: # Ensure valid range
+            ranges.append((current_start, current_end))
+        current_start = current_end + 1
+
+    if not ranges:
+        logger.warning("No valid block ranges to process. Adjust START_BLOCK_RANGE and END_BLOCK_RANGE.")
+        return
+
+    processes = []
+    for i, (start_block, end_block) in enumerate(ranges):
+        logger.info(f"Assigning Process {i+1}: blocks {start_block} to {end_block}")
+        p = multiprocessing.Process(target=worker_process, args=(start_block, end_block, MONGO_URI, DB_NAME), name=f"Worker-{i+1}")
+        processes.append(p)
+        p.start()
+
+    # Wait for all processes to complete
+    try:
+        while processes:
+            for p in processes:
+                if not p.is_alive():
+                    p.join() # Clean up finished processes
+                    processes.remove(p)
+                    logger.info(f"Process {p.name} finished.")
+                    break # Restart iteration as list was modified
+            await asyncio.sleep(1) # Check every second
+    except KeyboardInterrupt:
+        logger.info("Main process interrupted. Terminating child processes...")
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+                p.join() # Wait for termination
+        logger.info("All child processes terminated.")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred in main: {e}", exc_info=True)
+    finally:
+        logger.info("Bulk fetching process completed or interrupted.")
+
+if __name__ == "__main__":
+    # This check is crucial for multiprocessing on Windows
+    # It ensures that the child processes import the main module properly.
+    multiprocessing.freeze_support()
+    asyncio.run(main())
