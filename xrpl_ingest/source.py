@@ -87,6 +87,7 @@ class WsSource:
 
     async def _open(self) -> _Conn:
         last: Optional[BaseException] = None
+        mismatched = 0
         for url in self.servers:
             for attempt in range(self.connect_retries):
                 conn = None
@@ -99,6 +100,7 @@ class WsSource:
                     return conn
                 except NetworkMismatch as e:
                     last = e
+                    mismatched += 1
                     log.error("%s: %s", url, e)
                     await self._drop(conn)
                     break  # wrong network will not fix itself; next server
@@ -109,6 +111,8 @@ class WsSource:
                     await self._drop(conn)
                     if attempt < self.connect_retries - 1:
                         await self._sleep(self._backoff(attempt))
+        if mismatched == len(self.servers):  # permanent: retrying cannot change the network
+            raise NetworkMismatch(f"every server is on the wrong network: {last}")
         raise ConnectFailed(f"all servers failed: {last}")
 
     def _start(self, ws: Any, url: str) -> _Conn:
@@ -117,6 +121,7 @@ class WsSource:
         return conn
 
     async def _read_loop(self, conn: _Conn) -> None:
+        reason = "closed by peer"
         try:
             async for raw in conn.ws:
                 try:
@@ -126,11 +131,13 @@ class WsSource:
                 fut = conn.pending.pop(msg.get("id"), None) if isinstance(msg, dict) else None
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
-        except Exception as e:  # noqa: BLE001
-            log.debug("reader for %s ended: %s", conn.url, e)
+        except Exception as e:  # noqa: BLE001 - e.g. websockets ConnectionClosedError
+            reason = f"{type(e).__name__}: {e}"  # websockets puts the close code/reason in str(e)
         finally:
+            if not conn.closed:  # closed=True means our own _drop/close; nothing to report
+                log.warning("connection to %s lost: %s", conn.url, reason)
             conn.closed = True
-            conn.fail_pending(ConnectionLost(f"connection to {conn.url} closed"))
+            conn.fail_pending(ConnectionLost(f"connection to {conn.url} closed: {reason}"))
 
     async def _drop(self, conn: Optional[_Conn]) -> None:
         if conn is None:

@@ -120,6 +120,11 @@ class FakeWs:
             self.closed = True
             self.queue.put_nowait(None)
 
+    def fail(self, exc):
+        """Make the reader's `async for` raise `exc` (e.g. websockets ConnectionClosedError)."""
+        self.closed = True
+        self.queue.put_nowait(exc)
+
     def __aiter__(self):
         return self
 
@@ -127,4 +132,6 @@ class FakeWs:
         item = await self.queue.get()
         if item is None:
             raise StopAsyncIteration
+        if isinstance(item, BaseException):
+            raise item
         return item

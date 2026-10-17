@@ -17,7 +17,7 @@ class TransientError(IngestError):
 
 
 class ConnectFailed(TransientError):
-    """No configured server could be reached (or passed the network check)."""
+    """No configured server could be reached. (All on the wrong network => NetworkMismatch.)"""
 
 
 class ConnectionLost(TransientError):
@@ -33,7 +33,7 @@ class NotValidated(TransientError):
 
 
 class NetworkMismatch(IngestError):
-    """Server reports a different network_id than expected (e.g. testnet)."""
+    """Server reports a different network_id than expected (e.g. testnet). Not retried."""
 
 
 class MalformedLedger(IngestError):

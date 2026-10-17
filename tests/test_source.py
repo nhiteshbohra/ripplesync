@@ -2,10 +2,13 @@ import asyncio
 import json
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from conftest import FakeWs, no_sleep
-from xrpl_ingest.errors import (ConnectFailed, ConnectionLost, RequestTimeout, RpcError,
-                                TransientError)
+from xrpl_ingest.errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
+                                RpcError, TransientError, is_retryable)
+from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger
 from xrpl_ingest.source import WsSource
 
 
@@ -160,6 +163,61 @@ def test_connection_drop_fails_inflight_then_reconnects():
     assert len(made) == 2
 
 
+def reader_dies_on_ledger(end_reader):
+    """connect fn whose socket ends the reader (via end_reader(ws)) when a ledger is requested."""
+    made = []
+
+    def handler(req):
+        if req["command"] == "ledger":
+            end_reader(made[-1])
+            return None
+        return default_handler(req)
+
+    async def connect(url, **_):
+        made.append(FakeWs(handler))
+        return made[-1]
+    return connect
+
+
+def test_reader_error_reason_reaches_pending_request_and_log(caplog):
+    too_big = ConnectionClosedError(None, Close(1009, "frame exceeds limit of 1000 bytes"))
+    connect = reader_dies_on_ledger(lambda ws: ws.fail(too_big))
+
+    async def go():
+        s = make_source(connect, request_timeout=5)
+        with pytest.raises(ConnectionLost, match=r"1009 \(message too big\)"):
+            await s.get_ledger(1)
+        await s.close()
+    with caplog.at_level("WARNING", logger="xrpl_ingest.source"):
+        run(go())
+    assert any("ws://a" in m and "message too big" in m for m in caplog.messages)
+
+
+def test_peer_close_reason_reaches_pending_request_and_log(caplog):
+    connect = reader_dies_on_ledger(lambda ws: ws.queue.put_nowait(None))  # clean close by server
+
+    async def go():
+        s = make_source(connect, request_timeout=5)
+        with pytest.raises(ConnectionLost, match="closed by peer"):
+            await s.get_ledger(1)
+        await s.close()
+    with caplog.at_level("WARNING", logger="xrpl_ingest.source"):
+        run(go())
+    assert any("ws://a" in m and "closed by peer" in m for m in caplog.messages)
+
+
+def test_own_close_does_not_log_warning(caplog):
+    connect, _ = single()
+
+    async def go():
+        s = make_source(connect)
+        await s.server_info()
+        await s.close()
+    with caplog.at_level("WARNING", logger="xrpl_ingest.source"):
+        run(go())
+    assert caplog.records == []
+
+
 def test_send_on_closed_socket_becomes_connection_lost():
     connect, made = single()
 
@@ -206,7 +264,33 @@ def test_testnet_server_rejected_by_network_check():
 
     async def go():
         await make_source(connect, servers=("ws://testnet",)).server_info()
-    with pytest.raises(ConnectFailed, match="network_id 1"):
+    with pytest.raises(NetworkMismatch, match="network_id 1") as e:
+        run(go())
+    assert not is_retryable(e.value)  # wrong network will not fix itself; do not retry
+
+
+def test_every_server_on_wrong_network_is_permanent_not_retried(store):
+    opened = []
+
+    async def connect(url, **_):
+        opened.append(url)
+        return FakeWs(lambda req: info_reply(req, network_id=1))
+
+    src = make_source(connect, connect_retries=5)
+    res = run(ingest_ledger(src, store, 5, RetryPolicy(5, 0, 0), sleep=no_sleep))
+    assert not res.ok and res.error.startswith("NetworkMismatch")
+    assert opened == ["ws://a", "ws://b"]  # one connect per server, no retry rounds
+
+
+def test_mixed_failures_stay_connect_failed():
+    async def connect(url, **_):
+        if url == "ws://a":
+            raise OSError("refused")
+        return FakeWs(lambda req: info_reply(req, network_id=1))
+
+    async def go():
+        await make_source(connect).server_info()
+    with pytest.raises(ConnectFailed):
         run(go())
 
 
