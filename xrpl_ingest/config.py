@@ -1,15 +1,23 @@
 """Configuration from environment variables. Validates everything up front."""
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from .errors import ConfigError
 
 DEFAULT_SERVERS = ("ws://127.0.0.1:6006",)
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def setup_logging(level: str) -> None:
+    """stderr logging; used by the CLI and once in every spawn-pool worker process."""
+    logging.basicConfig(level=getattr(logging, level), stream=sys.stderr, format=LOG_FORMAT)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,8 @@
+import logging
+
 import pytest
 
-from xrpl_ingest.config import Config, DEFAULT_SERVERS
+from xrpl_ingest.config import DEFAULT_SERVERS, LOG_FORMAT, Config, setup_logging
 from xrpl_ingest.errors import ConfigError
 
 BASE = {"MONGO_URI": "mongodb://localhost:27017"}
@@ -68,6 +70,14 @@ def test_duplicate_collection_names_rejected():
 def test_bad_log_level():
     with pytest.raises(ConfigError, match="LOG_LEVEL"):
         Config.from_env({**BASE, "LOG_LEVEL": "loud"})
+
+
+def test_setup_logging_uses_shared_format_and_level(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: seen.update(kw))
+    setup_logging("WARNING")
+    assert seen["level"] == logging.WARNING and seen["format"] == LOG_FORMAT
+    assert "%(levelname)s %(name)s" in LOG_FORMAT
 
 
 def test_network_check_can_be_disabled():

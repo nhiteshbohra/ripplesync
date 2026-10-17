@@ -13,7 +13,7 @@ from typing import Any, Callable, List, Optional, Set, Tuple
 
 from pymongo.errors import PyMongoError
 
-from .config import Config
+from .config import Config, setup_logging
 from .constants import FIRST_LEDGER
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 from .ledger_ranges import Range, parse_complete_ledgers, plan_chunks
@@ -77,7 +77,8 @@ _store_cache: Optional[MongoStore] = None
 def _run_chunk_in_process(args: Tuple[Config, Range]) -> ChunkResult:
     global _store_cache
     cfg, chunk = args
-    if _store_cache is None:
+    if _store_cache is None:  # first chunk in this process
+        setup_logging(cfg.log_level)  # spawn children inherit no logging config
         _store_cache = MongoStore.from_config(cfg)
 
     async def go() -> ChunkResult:

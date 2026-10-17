@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import sys
 from typing import List, Optional
 
 from .backfill import discover_node, retry_failed, retry_policy, run_backfill
-from .config import Config
+from .config import Config, setup_logging
 from .constants import FIRST_LEDGER
 from .errors import ConfigError
 from .source import WsSource
@@ -44,11 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _setup_logging(level: str) -> None:
-    logging.basicConfig(level=getattr(logging, level), stream=sys.stderr,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -58,7 +52,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    _setup_logging(cfg.log_level)
+    setup_logging(cfg.log_level)
     stop = lambda: stop_requested(cfg.process_status_file)  # noqa: E731
 
     try:

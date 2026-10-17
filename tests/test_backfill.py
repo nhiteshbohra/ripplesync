@@ -214,6 +214,19 @@ def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path):
     assert store.done_chunks(POOL_LO, POOL_HI) == set()
 
 
+def test_pool_worker_configures_logging_once_per_process(cfg, store, tmp_path, monkeypatch):
+    flag = tmp_path / "s.txt"
+    flag.write_text("current_process=0")  # chunks stop at once; no node needed
+    cfg = dataclasses.replace(cfg, process_status_file=str(flag), log_level="DEBUG")
+    calls = []
+    monkeypatch.setattr(backfill, "setup_logging", calls.append)
+    monkeypatch.setattr(backfill, "_store_cache", None)
+    monkeypatch.setattr(backfill.MongoStore, "from_config", lambda _cfg: store)
+    for chunk in [(10, 19), (20, 29)]:
+        assert backfill._run_chunk_in_process((cfg, chunk)).completed is False
+    assert calls == ["DEBUG"]  # spawn children start with no logging config at all
+
+
 def test_mark_chunk_done_error_does_not_raise_and_leaves_chunk_unmarked(store, monkeypatch):
     def boom(*a):
         raise AutoReconnect("down")
