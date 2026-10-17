@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Idempotently edit xrpld.cfg stanzas. Backs the file up first.
+"""Idempotently edit xrpld.cfg stanzas. Backs the file up first, writes atomically.
 
-usage: edit_cfg.py CFG --db-path PATH [--history full|pruned] [--node-size huge]
+usage: edit_cfg.py CFG --db-path PATH [--history full|pruned]
+                       [--node-size tiny|small|medium|large|huge]
                        [--peer "host port"]...
 """
 from __future__ import annotations
@@ -11,10 +12,13 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from typing import List
 
 HEADER = re.compile(r"^\[([A-Za-z0-9_]+)\]\s*$")
+
+NODE_SIZES = ("tiny", "small", "medium", "large", "huge")
 
 WS_ADMIN = ["port = 6006", "ip = 127.0.0.1", "admin = 127.0.0.1", "protocol = ws"]
 
@@ -94,12 +98,39 @@ def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[
     return text
 
 
+def write_atomic(path: str, text: str) -> None:
+    """Write via a temp file in the same dir + os.replace; keep the original mode and owner."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        st = None
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".edit_cfg.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, (st.st_mode & 0o7777) if st else 0o644)
+        if st and hasattr(os, "chown"):
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass  # not root: the file stays owned by us
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cfg")
     ap.add_argument("--db-path", required=True)
     ap.add_argument("--history", choices=("full", "pruned"), default="full")
-    ap.add_argument("--node-size", default="huge")
+    ap.add_argument("--node-size", choices=NODE_SIZES, default="huge")
     ap.add_argument("--peer", action="append", default=[])
     a = ap.parse_args(argv)
 
@@ -110,12 +141,11 @@ def main(argv=None) -> int:
         text = ""
     backup = f"{a.cfg}.bak.{int(time.time())}"
     if text:
-        shutil.copyfile(a.cfg, backup)
+        shutil.copy2(a.cfg, backup)  # keeps mode/timestamps
         print(f"backup: {backup}")
     new = apply(text, db_path=a.db_path, history=a.history, node_size=a.node_size, peers=a.peer)
     os.makedirs(os.path.dirname(os.path.abspath(a.cfg)), exist_ok=True)
-    with open(a.cfg, "w", encoding="utf-8") as f:
-        f.write(new)
+    write_atomic(a.cfg, new)
     print(f"updated {a.cfg} (history={a.history}, node_size={a.node_size}, db={a.db_path})")
     return 0
 

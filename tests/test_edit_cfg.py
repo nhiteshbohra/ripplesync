@@ -1,5 +1,8 @@
 import os
+import stat
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "setup"))
 import edit_cfg  # noqa: E402
@@ -65,3 +68,58 @@ def test_cli_writes_backup(tmp_path):
     assert edit_cfg.main([str(cfg), "--db-path", "/x"]) == 0
     assert any(p.name.startswith("xrpld.cfg.bak.") for p in tmp_path.iterdir())
     assert "path=/x" in cfg.read_text()
+
+
+def test_cli_rejects_unknown_node_size(tmp_path):
+    cfg = tmp_path / "xrpld.cfg"
+    cfg.write_text(SAMPLE)
+    with pytest.raises(SystemExit) as e:
+        edit_cfg.main([str(cfg), "--db-path", "/x", "--node-size", "gigantic"])
+    assert e.value.code == 2
+    assert cfg.read_text() == SAMPLE
+    assert [p.name for p in tmp_path.iterdir()] == ["xrpld.cfg"]  # no backup, no temp file
+
+
+@pytest.mark.parametrize("size", edit_cfg.NODE_SIZES)
+def test_cli_accepts_every_node_size(tmp_path, size):
+    cfg = tmp_path / "xrpld.cfg"
+    cfg.write_text(SAMPLE)
+    assert edit_cfg.main([str(cfg), "--db-path", "/x", "--node-size", size]) == 0
+    assert sections(cfg.read_text())["node_size"] == [size]
+
+
+def test_cli_creates_missing_cfg_without_backup(tmp_path):
+    cfg = tmp_path / "sub" / "xrpld.cfg"
+    assert edit_cfg.main([str(cfg), "--db-path", "/x"]) == 0
+    assert "path=/x" in cfg.read_text()
+    assert [p.name for p in cfg.parent.iterdir()] == ["xrpld.cfg"]
+
+
+def test_failed_write_keeps_original_and_leaves_no_temp(tmp_path, monkeypatch):
+    cfg = tmp_path / "xrpld.cfg"
+    cfg.write_text(SAMPLE)
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(edit_cfg.os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        edit_cfg.write_atomic(str(cfg), "new contents\n")
+    assert cfg.read_text() == SAMPLE
+    assert [p.name for p in tmp_path.iterdir()] == ["xrpld.cfg"]
+
+
+# POSIX permission bits are not meaningful on Windows (chmod only toggles read-only).
+posix_only = pytest.mark.skipif(os.name == "nt", reason="file mode bits not meaningful on Windows")
+
+
+@posix_only
+def test_cli_keeps_mode_on_backup_and_cfg(tmp_path):
+    cfg = tmp_path / "xrpld.cfg"
+    cfg.write_text(SAMPLE)
+    os.chmod(cfg, 0o640)
+    assert edit_cfg.main([str(cfg), "--db-path", "/x"]) == 0
+    (backup,) = [p for p in tmp_path.iterdir() if p.name.startswith("xrpld.cfg.bak.")]
+    assert stat.S_IMODE(os.stat(backup).st_mode) == 0o640
+    assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o640
+    assert backup.read_text() == SAMPLE
