@@ -98,6 +98,17 @@ def test_repr_redacts_server_credentials():
     ("all servers failed: cannot reach ws://u:secret@a:6006 (refused)",
      "all servers failed: cannot reach ws://a:6006 (refused)"),
     ("no creds ws://a and mongodb://h", "no creds ws://a and mongodb://h"),
+    # Auditor A r13
+    ("ws://u:pa/ss@host:6006", "ws://host:6006"),  # unencoded '/' in the password
+    ("mongodb://u:p@h1:27017,h2:27017/db?authSource=admin", "mongodb://h1:27017,h2:27017/db?authSource=admin"),
+    ("mongodb+srv://u:p@cluster.example.net/db", "mongodb+srv://cluster.example.net/db"),
+    ("connect to ws://a:b@h failed: [Errno 111] x@y", "connect to ws://h failed: [Errno 111] x@y"),
+    ("ws://host:6006/?token=a@b", "ws://host:6006/?token=a@b"),  # '@' in the query is not userinfo
+    ("email admin@example.com", "email admin@example.com"),
+    ("ws://u%40x:p%2Fq@host", "ws://host"),
+    ("WS://U:P@HOST", "WS://HOST"),
+    ("ws://host:6006 (user@host on ssh)", "ws://host:6006 (user@host on ssh)"),
+    ("ws://u:p#x@host", "ws://host"),
 ])
 def test_redact_url_in_urls_and_messages(text, shown):
     assert redact_url(text) == shown

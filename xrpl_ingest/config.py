@@ -13,7 +13,10 @@ from .errors import ConfigError
 
 DEFAULT_SERVERS = ("ws://127.0.0.1:6006",)
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s]*@", re.IGNORECASE)
+# userinfo = everything up to the LAST '@' of the URL token (passwords may hold '/', '@',
+# '#'), but never past whitespace (next token) or '?' (an '@' in the query is not userinfo).
+# A '@' in a path without '?' over-redacts, which hides text but never leaks it.
+_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^\s?]*@", re.IGNORECASE)
 
 
 def redact_url(text: str) -> str:
