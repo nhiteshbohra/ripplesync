@@ -385,3 +385,44 @@ def test_readable_fields_pure_helper():
     assert readable_amount("amount", True) == {}  # bool is not drops
     mpt = readable_amount("amount", {"mpt_issuance_id": "00ABC", "value": "100"})
     assert mpt == {"amount_value": Decimal128("100")}  # no currency/issuer to report
+
+
+# -- coercion warnings: one per (field, ledger), not one per transaction ---------------------
+
+def coercion_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelname == "WARNING" and "not converted to int" in r.getMessage()]
+
+
+def bad_tx(n):
+    tx = make_tx(n)
+    tx["tx_json"].update(Fee="abc", Amount="x1", Sequence=str(2**70))
+    return tx
+
+
+def test_uncoercible_values_warn_once_per_field_per_ledger(caplog):
+    with caplog.at_level("WARNING", logger="xrpl_ingest.transform"):
+        txs, _ = flatten_transactions(77, "LH", 0, [bad_tx(i) for i in range(5)], NOW)
+    assert txs[0]["Fee"] == "abc" and txs[0]["Sequence"] == str(2**70)  # stored as received
+    warnings = coercion_warnings(caplog)
+    assert len(warnings) == 3
+    text = "\n".join(r.getMessage() for r in warnings)
+    for field in ("Fee", "Amount", "Sequence"):
+        assert f"ledger 77: {field} not converted to int in 5 transaction(s)" in text
+    assert "'abc'" in text and "H100_0" in text  # an example value and tx hash
+
+
+def test_each_ledger_warns_separately(caplog):
+    with caplog.at_level("WARNING", logger="xrpl_ingest.transform"):
+        flatten_transactions(1, "LH", 0, [bad_tx(0)], NOW)
+        flatten_transactions(2, "LH", 0, [bad_tx(0)], NOW)
+    assert len(coercion_warnings(caplog)) == 6
+
+
+def test_no_coercion_warning_for_clean_or_legitimately_non_int_values(caplog):
+    tx = make_tx(0)
+    tx["tx_json"]["TakerGets"] = {"currency": "USD", "issuer": "rI", "value": "1"}
+    tx["meta"]["delivered_amount"] = "unavailable"
+    with caplog.at_level("WARNING", logger="xrpl_ingest.transform"):
+        flatten_transactions(1, "LH", 0, [tx, make_tx(1)], NOW)
+    assert coercion_warnings(caplog) == []

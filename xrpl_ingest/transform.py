@@ -288,6 +288,27 @@ def build_ledger_doc(index: int, ledger: Dict[str, Any], num_transactions: int,
     return doc
 
 
+def coerce_fields(doc: Dict[str, Any], uncoerced: Dict[str, List[Any]]) -> None:
+    """int-convert INT_FIELDS and string AMOUNT_FIELDS in place. A string that stays a string
+    (not numeric, or > int64) is stored as received and counted in `uncoerced`:
+    field -> [count, example tx hash, example value]."""
+    for field in INT_FIELDS + AMOUNT_FIELDS:
+        value = doc.get(field)
+        if value is None or (field in AMOUNT_FIELDS and not isinstance(value, str)):
+            continue
+        doc[field] = to_int(value)
+        if isinstance(value, str) and isinstance(doc[field], str):
+            seen = uncoerced.setdefault(field, [0, doc.get("hash"), value])
+            seen[0] += 1
+
+
+def warn_uncoerced(block_number: int, uncoerced: Dict[str, List[Any]]) -> None:
+    """One WARNING per field per ledger, however many transactions are affected."""
+    for field, (count, tx_hash, value) in sorted(uncoerced.items()):
+        log.warning("ledger %d: %s not converted to int in %d transaction(s), stored as "
+                    "received (e.g. tx %s: %r)", block_number, field, count, tx_hash, value)
+
+
 def _meta_key(tx: Dict[str, Any]) -> Optional[str]:
     """'meta' (v2) or 'metaData' (v1): the first non-empty object, else the first object."""
     keys = [k for k in ("meta", "metaData") if isinstance(tx.get(k), dict)]
@@ -301,6 +322,7 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
     iso = close_time_iso(close_time)
     tx_docs: List[Dict[str, Any]] = []
     meta_docs: List[Dict[str, Any]] = []
+    uncoerced: Dict[str, List[Any]] = {}
 
     for tx in transactions:
         if not isinstance(tx, dict):
@@ -339,12 +361,7 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             raise MalformedLedger(f"ledger {block_number}: transaction without hash")
 
         copy_deliver_max(doc)
-        for field in INT_FIELDS:
-            if doc.get(field) is not None:
-                doc[field] = to_int(doc[field])
-        for field in AMOUNT_FIELDS:
-            if isinstance(doc.get(field), str):
-                doc[field] = to_int(doc[field])
+        coerce_fields(doc, uncoerced)
         for k, v in derived_tx_fields(doc, meta).items():
             put_derived(doc, k, v)
 
@@ -363,6 +380,7 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             "_inserted_at": now,
         })
 
+    warn_uncoerced(block_number, uncoerced)
     return tx_docs, meta_docs
 
 
