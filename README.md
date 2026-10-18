@@ -43,7 +43,7 @@ Read the [Requirements](#requirements) first. Full history is very large (about 
 
 Every field the node sends is stored. Nothing is dropped. See [Data model](#data-model-nothing-is-dropped).
 
-Why a new program? The old scripts (kept locally and in git history, not in this repo) used **public** XRPL servers.
+Why a new program? The old scripts (no longer in this repository; still in its git history) used **public** XRPL servers.
 Public servers limit how many requests one client may send (rate limits). The old scripts lost data because of these limits.
 The problem was the public servers, not websockets. This program still uses websockets, but it talks to your own node as an **admin** client.
 xrpld does not rate-limit admin clients ([xrpl.org: Rate Limiting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting)).
@@ -90,6 +90,9 @@ Important ideas:
 For people who already know Linux, xrpld and MongoDB. Everyone else: follow Steps 1 to 7.
 
 ```bash
+# 0. Get the code (or download a ZIP: see Step 5.2)
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
 # 1-2. Node: install xrpld, configure full history, start it (Ubuntu)
 DB_PATH=/data/xrpld/db/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
 # 3. Wait until server_state is "full"
@@ -651,10 +654,60 @@ Note: for Python 3.12 the last Windows/macOS installer from python.org is 3.12.1
 
 Put the code on the machine's own disk. In WSL use the Linux home folder, not `/mnt/c/...`.
 
+The repository is public: no GitHub account is needed to download it.
+
+**Option A: `git clone` (recommended; later updates are one `git pull`)**
+
+You need git: Ubuntu/Debian `sudo apt-get install -y git`, RHEL/Rocky `sudo dnf install -y git`, macOS `xcode-select --install`, Windows [git-scm.com](https://git-scm.com/download/win) or `winget install Git.Git`.
+
+Linux / macOS / WSL:
+
 ```bash
-git clone <your repository URL> xrpl-ingest
-cd xrpl-ingest
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
 ```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
+```
+
+With SSH instead of HTTPS (only if you have a GitHub account with an SSH key; HTTPS above needs nothing):
+
+```bash
+git clone git@github.com:nhiteshbohra/ripplesync.git
+cd ripplesync
+```
+
+Get the newest version later (from inside the folder): `git pull`
+
+**Option B: download a ZIP (no git needed)**
+
+In a browser: open https://github.com/nhiteshbohra/ripplesync, click the green **Code** button, then **Download ZIP**. You get `ripplesync-main.zip`.
+
+Or from the command line, download, unpack and go into the folder:
+
+Linux / macOS / WSL (`sudo apt-get install -y unzip` if `unzip` is missing):
+
+```bash
+curl -L -o ripplesync-main.zip https://github.com/nhiteshbohra/ripplesync/archive/refs/heads/main.zip
+unzip ripplesync-main.zip
+cd ripplesync-main
+```
+
+Windows (PowerShell):
+
+```powershell
+Invoke-WebRequest https://github.com/nhiteshbohra/ripplesync/archive/refs/heads/main.zip -OutFile ripplesync-main.zip
+Expand-Archive .\ripplesync-main.zip -DestinationPath .
+cd .\ripplesync-main
+```
+
+A ZIP has no git history and no `git pull`: to update, download a new ZIP and copy your `.env` (and `backfill_range.txt`, if you made one) into the new folder.
+
+All commands in this guide are run from inside this folder (`ripplesync`, or `ripplesync-main` for the ZIP).
 
 ### 5.3 Create a virtual environment and install
 
