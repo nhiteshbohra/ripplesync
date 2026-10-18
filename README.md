@@ -894,7 +894,7 @@ end   = 60_000_000
 Rules:
 
 - **Precedence:** command line > file > defaults. If you give `--start` **or** `--end`, the file is ignored completely (the log says so).
-- `--no-range-file` skips the file and uses the defaults. `--range-file PATH` reads another file.
+- `--no-range-file` skips the file and uses the defaults. `--range-file PATH` reads another file; if that file does not exist the command stops with exit `2` (a missing *default* file just means: use the defaults).
 - No file = defaults (`32570` to `latest`), with an INFO log line.
 - Keys are not case-sensitive. Only `start` and `end` are allowed.
 - An unknown key, a key given twice, or a line without `=` is a config error (exit code `2`). The message names the file and the line.
@@ -1303,6 +1303,8 @@ Runbook:
    ```
 
 8. **Rewrite a whole range** (for example to add the new fields to documents written by an older version). Backfill skips chunks that are marked done, so remove the chunk marks of that range first, then backfill it again. Upserts replace the old documents.
+
+   Safe: this deletes only the *progress marks* (documents with `kind: "backfill_chunk"`), never ledger or transaction data. Use your real names from `.env`: `DB_NAME` (default `xrpl_data_collection`) and `METADATA_COLLECTION` (default `last_processed_block_no`). Do not change the `kind` filter.
 
    ```javascript
    // mongosh; example range 32570-1000000; chunk documents live in last_processed_block_no

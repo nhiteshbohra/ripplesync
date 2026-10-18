@@ -112,7 +112,7 @@ Register-ScheduledTask -TaskName $taskName -Description $description -Action $ac
 Write-Host "Registered task $taskName (runs at startup as $userId; not started now)."
 Write-Host "  Start now : Start-ScheduledTask -TaskName $taskName"
 Write-Host "  Status    : Get-ScheduledTaskInfo -TaskName $taskName   (LastTaskResult = exit code)"
-Write-Host "  Logs      : $repo\logs\xrpl_ingest.log (run.cmd default LOG_FILE)"
+Write-Host "  Logs      : $repo\logs\xrpl_ingest_$Command.log (run.cmd default LOG_FILE)"
 Write-Host "  Stop      : Set-Content -Encoding ascii '$repo\process_status.txt' '$Command=0'"
 Write-Host "  Remove    : install-task.ps1 -Command $Command -Uninstall"
 if ($Command -eq 'backfill') {
