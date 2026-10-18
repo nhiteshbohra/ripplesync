@@ -1,5 +1,5 @@
 # Text files are stored and checked out with LF everywhere (core.autocrlf=true on Windows
-# would otherwise check them out as CRLF, which breaks bash, systemd units and Docker on Linux).
+# would otherwise check them out as CRLF, which breaks bash and systemd units on Linux).
 # Binary files (incl. UTF-16 text, which contains NUL bytes) are detected and left alone.
 * text=auto eol=lf
 *.sh text eol=lf

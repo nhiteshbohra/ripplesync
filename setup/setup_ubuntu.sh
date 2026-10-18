@@ -14,7 +14,6 @@
 #   NODE_SIZE=huge             xrpld [node_size]                               [huge]
 #   FIXED_PEERS="host port;host port"   extra [ips_fixed] entries (see docs)
 #   MONGO_URI=mongodb://...    written to .env (else you are asked)
-#   PYTHON=python3.12          interpreter for .venv (>= 3.10; 3.12 recommended)
 #   FORCE=1                    continue past failed hardware/OS checks
 set -euo pipefail
 
@@ -144,5 +143,5 @@ case "${1:-}" in
   node)   install_node ;;
   ingest) setup_ingest ;;
   all)    install_node; setup_ingest ;;
-  *) sed -n '2,18p' "$0"; exit 2 ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac

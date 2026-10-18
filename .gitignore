@@ -17,10 +17,6 @@ logs/
 process_status.txt
 backfill_range.txt
 
-# Docker: local data dir and MongoDB credentials (docker/mongo.env.example is the template)
-/data/
-docker/mongo.env
-
 # Local virtual environments
 .venv/
 venv/

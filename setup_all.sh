@@ -7,8 +7,7 @@
 # Ubuntu 20.04+ / Debian 11+; MongoDB 8.0 apt repo: Ubuntu 20.04/22.04/24.04 only), or WSL2:
 #   1. System preflight checks
 #   2. Installs official MongoDB Community Edition 8.0 & starts service
-#      (skipped on WSL -- MongoDB does not support WSL; run it on Windows, instructions printed --
-#       and on releases without a MongoDB 8.0 apt repo)
+#      (skipped on WSL -- MongoDB does not support WSL; run it on Windows, instructions printed)
 #   3. Installs official XRPLF xrpld (pinned key fingerprint), configures /etc/xrpld/xrpld.cfg & starts it
 #   4. Sets up the Python virtual environment (.venv; Python >= 3.10, 3.12 recommended)
 #   5. Configures .env with local Mongo & WebSocket admin connections
@@ -20,7 +19,7 @@
 #   bash setup_all.sh                               # Interactive or standard pruned defaults
 #   HISTORY_MODE=pruned bash setup_all.sh           # Pruned mode (expected: tens of GB disk; sync time not measured)
 #   HISTORY_MODE=full bash setup_all.sh             # Full history mode (~39 TB disk per xrpl.org; months to sync)
-# Env: DB_PATH, NODE_SIZE, FIXED_PEERS, MONGO_URI, PYTHON=python3.12, SKIP_MONGO=1, FORCE=1
+# Env: DB_PATH, NODE_SIZE, FIXED_PEERS, MONGO_URI, FORCE=1
 # ==============================================================================
 
 set -euo pipefail
@@ -148,7 +147,7 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 2/6] MongoDB Community Edition $MONGO_SERIES"
 
-install_mongodb   # skips WSL (unsupported there), SKIP_MONGO=1, releases without a repo, other installed versions
+install_mongodb   # skipped on WSL (unsupported there); stops on releases without a MongoDB 8.0 repo
 
 ok "MongoDB step complete"
 echo ""
@@ -201,7 +200,7 @@ echo ""
 say "[Phase 4/6] Setting Up Python Ingestion Environment"
 
 $SUDO apt-get install -y python3 python3-venv python3-pip
-pick_python   # >= 3.10 required, 3.12 recommended (PYTHON=... to choose)
+pick_python   # >= 3.10 required, 3.12 recommended (python3.12 is used when on PATH)
 make_venv     # .venv + pip install -r requirements.txt
 
 # Configure .env

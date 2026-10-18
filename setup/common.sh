@@ -50,23 +50,19 @@ check_platform() {
   elif ! version_ge "$glibc" 2.31; then
     need_ok "glibc $glibc is older than 2.31; the xrpld package needs Ubuntu 20.04+ or Debian 11+"
   fi
-  command -v apt-get >/dev/null 2>&1 || need_ok "apt-get not found; these scripts only support apt-based systems (Ubuntu/Debian)"
 }
 
 python312_hint() {
   echo "To get Python 3.12: Ubuntu 24.04 ships it (sudo apt-get install python3.12 python3.12-venv);" \
        "on other releases use pyenv or uv, or the deadsnakes PPA (third-party, not from Canonical:" \
        "sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt-get install python3.12 python3.12-venv)," \
-       "then re-run with PYTHON=python3.12."
+       "then re-run this script (python3.12 is used automatically when it is on PATH)."
 }
 
-# pick_python: set PYTHON to an interpreter >= 3.10 (3.12 preferred). Override: PYTHON=/path.
+# pick_python: set PYTHON to python3.12 if on PATH, else python3; require >= 3.10.
 pick_python() {
   local cand v
-  if [ -n "${PYTHON:-}" ]; then cand="$PYTHON"
-  elif command -v python3.12 >/dev/null 2>&1; then cand=python3.12
-  else cand=python3
-  fi
+  if command -v python3.12 >/dev/null 2>&1; then cand=python3.12; else cand=python3; fi
   command -v "$cand" >/dev/null 2>&1 || die "$cand not found. $(python312_hint)"
   v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])')" || die "cannot run $cand"
   version_ge "$v" 3.10 || die "$cand is Python $v; xrpl_ingest needs Python >= 3.10 (3.12 recommended). $(python312_hint)"
@@ -150,24 +146,12 @@ start_xrpld() {
   else
     warn "no systemd: xrpld was not started. Start it as the xrpld user (same command line as the packaged unit; not verified here):"
     echo "    $XRPLD_START_CMD"
-    echo "  e.g. inside tmux/screen, or: nohup $XRPLD_START_CMD >/dev/null 2>&1 &"
-    echo "  Logs go to /var/log/xrpld/debug.log (--silent: nothing on the console)."
   fi
 }
 
-# peer_port CFG: the port of the [port_peer] stanza, if readable.
-peer_port() {
-  # shellcheck disable=SC2016  # $0 is awk's, not the shell's
-  $SUDO awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[port_peer\]/) }
-             s && /^[[:space:]]*port[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }' "$1" 2>/dev/null || true
-}
-
 firewall_note() {
-  local p
-  p="$(peer_port "$XRPLD_CFG")"
-  echo "Firewall: allow incoming TCP ${p:-2459} (xrpld peer port, [port_peer] in $XRPLD_CFG;"
-  echo "  2459 in the 3.4.1 default cfg, 51235 in older configs) and forward it on a NAT router."
-  echo "  Keep the admin ports (5005 http, 6006 ws, 50051 grpc) bound to 127.0.0.1 only."
+  echo "Firewall: allow incoming TCP 2459, the xrpld peer port in the 3.4.1 default cfg (51235 in"
+  echo "  older configs; check [port_peer] in $XRPLD_CFG), and forward it on a NAT router."
 }
 
 wsl_mongo_notes() {
@@ -188,57 +172,39 @@ EOF
 }
 
 # install_mongodb: MongoDB 8.0 from the official repo on Ubuntu 20.04/22.04/24.04.
-# Skipped on WSL (unsupported there), with SKIP_MONGO=1, on other distributions, and when
-# a different MongoDB server version is already installed (no automatic upgrades).
+# Skipped on WSL (MongoDB does not support WSL). Other releases: stop with a message.
 install_mongodb() {
-  local codename have tmp fprs list=/etc/apt/sources.list.d/mongodb-org-$MONGO_SERIES.list
+  local codename tmp fprs list=/etc/apt/sources.list.d/mongodb-org-$MONGO_SERIES.list
   if is_wsl; then wsl_mongo_notes; return 0; fi
-  if [ "${SKIP_MONGO:-0}" = 1 ]; then say "SKIP_MONGO=1: not installing MongoDB"; return 0; fi
-  codename="${UBUNTU_CODENAME:-}"
-  [ -n "$codename" ] || { [ "${ID:-}" = ubuntu ] && codename="${VERSION_CODENAME:-}"; } || true
+  codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"  # derivatives (Mint, Pop!_OS) set UBUNTU_CODENAME
   case "$codename" in
     focal|jammy|noble) ;;
-    *)
-      warn "MongoDB $MONGO_SERIES: the MongoDB docs list apt repos only for Ubuntu 20.04/22.04/24.04 (focal/jammy/noble), not for ${PRETTY_NAME:-this system}; not installing MongoDB."
-      echo "  Install MongoDB 8.0 (or 7.0) another way -- e.g. 'docker compose up -d mongo' (see docker-compose.yml) or another host -- and set MONGO_URI in .env."
-      echo "  MongoDB 9.0 is not supported yet (needs pymongo >= 4.17; requirements.txt pins < 4.11)."
-      return 0 ;;
+    *) die "No MongoDB $MONGO_SERIES apt repo for codename '${codename:-unknown}' (MongoDB docs: Ubuntu focal/jammy/noble only). Install MongoDB 8.0 (or 7.0) manually; 9.0 is not supported by the pinned pymongo." ;;
   esac
-  have="$(dpkg-query -W -f='${Version}' mongodb-org-server 2>/dev/null || true)"
-  if [ -n "$have" ]; then
-    case "$have" in
-      "$MONGO_SERIES".*) say "MongoDB server $have already installed" ;;
-      *) warn "MongoDB server $have is already installed; not changing it (upgrade by hand, following MongoDB's upgrade docs). This project supports MongoDB 7.0 and 8.0."
-         return 0 ;;
-    esac
-  else
-    say "Installing MongoDB $MONGO_SERIES (official repo, Ubuntu $codename)"
-    $SUDO apt-get -y update
-    $SUDO apt-get -y install curl gnupg ca-certificates
-    tmp="$(mktemp)"
-    if ! curl -fsSL "$MONGO_KEY_URL" -o "$tmp"; then rm -f "$tmp"; die "download failed: $MONGO_KEY_URL"; fi
-    fprs="$(print_key_fprs "$tmp" || true)"
-    # Trust on first use: we have no officially published fingerprint to pin for this key.
-    echo "MongoDB $MONGO_SERIES signing key fingerprint(s), NOT pinned (trust on first use):"
-    printf '    %s\n' "${fprs:-<none parsed>}"
-    echo "  Compare with MongoDB's 'Verify Integrity of MongoDB Packages' page if you want to be sure."
-    $SUDO gpg --batch --yes --dearmor -o "$MONGO_KEYRING" <"$tmp"
-    $SUDO chmod 0644 "$MONGO_KEYRING"
-    rm -f "$tmp"
-    echo "deb [ arch=amd64,arm64 signed-by=$MONGO_KEYRING ] https://repo.mongodb.org/apt/ubuntu $codename/mongodb-org/$MONGO_SERIES multiverse" \
-      | $SUDO tee "$list" >/dev/null
-    $SUDO apt-get -y update
-    $SUDO apt-get -y install mongodb-org
-  fi
+  say "Installing MongoDB $MONGO_SERIES (official repo, Ubuntu $codename)"
+  $SUDO apt-get -y update
+  $SUDO apt-get -y install curl gnupg ca-certificates
+  tmp="$(mktemp)"
+  if ! curl -fsSL "$MONGO_KEY_URL" -o "$tmp"; then rm -f "$tmp"; die "download failed: $MONGO_KEY_URL"; fi
+  fprs="$(print_key_fprs "$tmp" || true)"
+  # Trust on first use: we have no officially published fingerprint to pin for this key.
+  echo "MongoDB $MONGO_SERIES signing key fingerprint(s), NOT pinned (trust on first use):"
+  printf '    %s\n' "${fprs:-<none parsed>}"
+  $SUDO gpg --batch --yes --dearmor -o "$MONGO_KEYRING" <"$tmp"
+  $SUDO chmod 0644 "$MONGO_KEYRING"
+  rm -f "$tmp"
+  echo "deb [ arch=amd64,arm64 signed-by=$MONGO_KEYRING ] https://repo.mongodb.org/apt/ubuntu $codename/mongodb-org/$MONGO_SERIES multiverse" \
+    | $SUDO tee "$list" >/dev/null
+  $SUDO apt-get -y update
+  $SUDO apt-get -y install mongodb-org
   if has_systemd; then
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable --now mongod
     sleep 2
-    if $SUDO systemctl is-active --quiet mongod; then say "mongod is active"; else warn "mongod is not active yet: systemctl status mongod"; fi
+    if $SUDO systemctl is-active --quiet mongod; then say "mongod is active"; else warn "mongod started with warnings: systemctl status mongod"; fi
   else
-    warn "no systemd: start mongod yourself, e.g. sudo -u mongodb mongod --config /etc/mongod.conf --fork (not verified here)"
+    warn "no systemd: start mongod manually with 'sudo mongod --config /etc/mongod.conf &'"
   fi
-  echo "  Note: MongoDB installs with authorization off and listens on 127.0.0.1 only; enable auth before opening it up."
 }
 
 # run_doctor ARGS...: python -m xrpl_ingest doctor ARGS from the repo (base dir = repo).
@@ -283,24 +249,19 @@ install_ingest_units() {
   case "$user" in
     ""|root) warn "not installing the xrpl-* units: they would run as root; re-run as a normal user (with sudo)"; return 1 ;;
   esac
-  [[ "$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || { warn "not installing the xrpl-* units: unusual user name '$user'"; return 1; }
   why="$(unit_value_problem "$REPO_DIR")"
   [ -z "$why" ] || { warn "not installing the xrpl-* units: repo path '$REPO_DIR' $why; move the repo to a plain path"; return 1; }
   esc_repo="$(sed_escape_repl "$REPO_DIR")"
   esc_user="$(sed_escape_repl "$user")"
   for name in xrpl-tail xrpl-backfill; do
     src="$REPO_DIR/deploy/systemd/$name.service"
-    dst="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$name.service"
+    dst="/etc/systemd/system/$name.service"
     [ -f "$src" ] || die "missing unit template $src"
     tmp="$(mktemp)"
     # Substitute on directive lines only; the template's comments keep naming the placeholders.
     sed -e "/^[[:space:]]*[#;]/!{s|@REPO_DIR@|$esc_repo|g;s|@USER@|$esc_user|g;}" "$src" >"$tmp"
     if grep -v '^[[:space:]]*[#;]' "$tmp" | grep -q '@[A-Z_]*@'; then
       rm -f "$tmp"; die "unreplaced placeholder left in rendered $name.service"
-    fi
-    if [ -f "$dst" ] && ! cmp -s "$tmp" "$dst"; then
-      $SUDO cp -p -- "$dst" "$dst.bak.$(date +%s)"   # systemd ignores *.bak.* files
-      warn "$dst differed from the template; old copy kept as $dst.bak.*"
     fi
     $SUDO install -m 0644 "$tmp" "$dst"
     rm -f "$tmp"
