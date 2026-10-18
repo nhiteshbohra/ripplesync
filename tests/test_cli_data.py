@@ -141,3 +141,55 @@ def test_verify_deep_repair_fixes_hash_mismatch(cli_main, node, store, capsys):
 def test_verify_deep_repair_without_node_exits_4(cli_main, dead_node, store):
     save(store, 1, 2, 3)
     assert cli_main(["verify", "--start", "1", "--end", "3", "--deep", "--repair"]) == 4
+
+
+# -- fetch ----------------------------------------------------------------------------------
+
+L = 32570  # FIRST_LEDGER
+
+
+def test_fetch_number_stores_ledger_without_chunk_and_clears_failure(cli_main, node, store,
+                                                                     capsys):
+    store.record_failure(L + 5, "earlier")
+    assert cli_main(["fetch", "--ledger", str(L + 5)]) == 0
+    assert capsys.readouterr().out.strip() == f"block_number {L + 5}: 2 transactions, stored"
+    assert node.calls == [L + 5] and store.ledgers.count_documents({"block_number": L + 5}) == 1
+    assert store.list_failed() == []
+    assert store.meta.count_documents({"kind": "backfill_chunk"}) == 0
+
+
+def test_fetch_validated_resolves_latest(cli_main, node, store, capsys):
+    node.latest = L + 42
+    assert cli_main(["fetch", "--ledger", "validated"]) == 0
+    assert node.calls == [L + 42] and f"block_number {L + 42}" in capsys.readouterr().out
+
+
+def test_fetch_failure_exits_1_and_is_recorded(cli_main, node, store, capsys):
+    node.script[L] = [RpcError("lgrNotFound")]
+    assert cli_main(["fetch", "--ledger", str(L)]) == 1
+    assert "failed: RpcError: lgrNotFound" in capsys.readouterr().out
+    assert store.list_failed() == [L]
+
+
+def test_fetch_node_unreachable_exits_4(cli_main, dead_node, capsys):
+    assert cli_main(["fetch", "--ledger", "validated"]) == 4
+    assert cli_main(["fetch", "--ledger", str(L)]) == 4
+
+
+@pytest.mark.parametrize("value", ["abc", "-5", str(L - 1), "1.5", ""])
+def test_fetch_bad_ledger_argument_exits_2(cli_main, node, capsys, value):
+    with pytest.raises(SystemExit) as e:
+        cli_main(["fetch", "--ledger", value])
+    assert e.value.code == 2 and node.calls == []
+    assert "expected a ledger number >= 32570 or 'validated'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error,recorded,code", [
+    (None, True, 0), ("RpcError: lgrNotFound", True, 1), ("StopRequested: stop", False, 1),
+    ("NetworkMismatch: network_id 1 != expected 0", True, 2),
+    ("ConnectFailed: all servers failed", True, 4), ("ServerSelectionTimeoutError: x", False, 4),
+])
+def test_fetch_exit_code(error, recorded, code):
+    from xrpl_ingest.fetcher import IngestResult
+    r = IngestResult(L, error is None, 0, error=error, recorded=recorded)
+    assert cli.fetch_exit_code(r) == code

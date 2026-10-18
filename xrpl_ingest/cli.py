@@ -167,6 +167,56 @@ def add_data_parsers(sub, verify: argparse.ArgumentParser) -> None:
                         help="also check parent_hash links (offline) and compare stored tx "
                              "hashes with the node's ledger hash lists")
 
+    f = sub.add_parser("fetch", help="fetch and store one ledger now (no chunk progress)",
+                       epilog="exit codes: 0 stored; 1 failed (recorded in the failed "
+                              "collection); 2 usage; 4 node or MongoDB unreachable")
+    f.add_argument("--ledger", type=ledger_arg, required=True, metavar="N|validated",
+                   help="ledger number, or 'validated' for the node's latest validated ledger")
+
+
+def ledger_arg(text: str):
+    """argparse type for fetch --ledger: 'validated' or a ledger number >= FIRST_LEDGER."""
+    t = text.strip().lower()
+    if t == "validated":
+        return t
+    if not t.isdigit() or int(t) < FIRST_LEDGER:
+        raise argparse.ArgumentTypeError(
+            f"expected a ledger number >= {FIRST_LEDGER} or 'validated', got {text!r}")
+    return int(t)
+
+
+def fetch_exit_code(result) -> int:
+    """0 stored; 2 wrong network; 4 node unreachable or failure not recordable (MongoDB);
+    1 any other failure, or a stop."""
+    if result.ok:
+        return 0
+    error = result.error or ""
+    if error.startswith("StopRequested"):
+        return 1
+    if error.startswith("NetworkMismatch"):
+        return 2
+    if error.startswith("ConnectFailed") or not result.recorded:
+        return 4
+    return 1
+
+
+def _fetch_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
+    return asyncio.run(_fetch(cfg, store, args.ledger, stop))
+
+
+async def _fetch(cfg: Config, store: MongoStore, ledger, stop) -> int:
+    from .fetcher import ingest_ledger
+    source = WsSource.from_config(cfg, stop_check=stop)
+    try:
+        index = await source.latest_validated() if ledger == "validated" else ledger
+        await asyncio.to_thread(store.ensure_indexes)
+        r = await ingest_ledger(source, store, index, retry_policy(cfg), clear_failure=True)
+    finally:
+        await source.close()
+    outcome = "stored" if r.ok else f"failed: {r.error}"
+    print(f"block_number {r.block_number}: {r.num_transactions} transactions, {outcome}")
+    return fetch_exit_code(r)
+
 
 def _verify_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
     if not (args.repair or args.deep):
@@ -219,4 +269,4 @@ async def _verify_with_node(cfg: Config, store: MongoStore, start: int, end: int
     return error_exit_code(node_error) if node_error is not None else 0
 
 
-DATA_COMMANDS = {"verify": _verify_cmd}
+DATA_COMMANDS = {"verify": _verify_cmd, "fetch": _fetch_cmd}
