@@ -10,14 +10,12 @@ from xrpl_ingest.transform import parse_ledger_result
 
 
 @pytest.fixture
-def cli_main(monkeypatch, cfg, store, tmp_path):
-    import dotenv
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+def cli_main(monkeypatch, cfg, store, tmp_path, isolated_environ):
+    monkeypatch.chdir(tmp_path)  # no .env here
     monkeypatch.setattr(cli.Config, "from_env", staticmethod(
-        lambda env=None: dataclasses.replace(cfg, process_status_file=str(tmp_path / "stop.txt"))))
-    monkeypatch.setattr(cli, "setup_logging", lambda level: None)
-    monkeypatch.setattr(cli.MongoStore, "from_config", lambda _cfg: store)
+        lambda env=None, **kw: dataclasses.replace(cfg, process_status_file=str(tmp_path / "stop.txt"))))
+    monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: [])
+    monkeypatch.setattr(cli.MongoStore, "from_config", lambda _cfg, **kw: store)
     monkeypatch.setattr(cli.MongoStore, "close", lambda self: None)
     return cli.main
 
