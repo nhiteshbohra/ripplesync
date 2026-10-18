@@ -1,8 +1,13 @@
+from decimal import Decimal
+
 import pytest
+from bson.decimal128 import Decimal128
 
 from conftest import NOW, make_result, make_tx
 from xrpl_ingest.errors import MalformedLedger, NotValidated
-from xrpl_ingest.transform import close_time_iso, flatten_transactions, parse_ledger_result, to_int
+from xrpl_ingest.transform import (close_time_iso, extract_affected_accounts,
+                                   flatten_transactions, parse_ledger_result, readable_amount,
+                                   to_int)
 
 
 def test_v2_transaction_flattened_and_renamed():
@@ -179,3 +184,204 @@ def test_no_deliver_max_no_amount_added():
 def test_v2_deliver_max_non_numeric_kept_as_is():
     txs, _ = flatten_transactions(1, "LH", 0, [v2_payment("bad")], NOW)
     assert txs[0]["Amount"] == "bad" and txs[0]["DeliverMax"] == "bad"
+
+
+# -- delivered_amount, affected_accounts, readable amounts ----------------------------------
+
+ALICE = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+BOB = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
+CAROL = "rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn"
+DAVE = "rMwjYedjc7qqtKYVLiAccJSmCwih4LnE2q"
+ISSUER = "rvYAfWj5gh67oV6fW32ZzP3Aw4Eubs59B"
+GW_HIGH = "rDsbeomae4FXwgQTJp9Rs64Qg9vDiTCdBv"
+GW_LOW = "rLNaPoKeeBjZe2qs6x52yVPZpZ8td4dc6w"
+
+
+def payment(amount="1000000", meta=None, **tx_json):
+    body = {"Account": ALICE, "Destination": BOB, "TransactionType": "Payment",
+            "Amount": amount, "Fee": "12", "Sequence": 1, **tx_json}
+    if amount is None:
+        del body["Amount"]
+    return {"hash": "HP", "tx_json": body,
+            "meta": {"TransactionResult": "tesSUCCESS", "TransactionIndex": 0,
+                     **(meta or {})}}
+
+
+def one(tx, **kw):
+    txs, _ = flatten_transactions(1, "LH", 0, [tx], NOW, **kw)
+    return txs[0]
+
+
+AFFECTED_META = {"AffectedNodes": [
+    {"CreatedNode": {"LedgerEntryType": "AccountRoot", "NewFields": {"Account": CAROL}}},
+    {"ModifiedNode": {"LedgerEntryType": "AccountRoot",
+                      "FinalFields": {"Account": ALICE, "Balance": "99"},
+                      "PreviousFields": {"Balance": "100"}}},
+    {"DeletedNode": {"LedgerEntryType": "Offer",
+                     "FinalFields": {"Account": ALICE, "Owner": DAVE, "Destination": BOB},
+                     "PreviousFields": {"Owner": DAVE}}},
+    {"ModifiedNode": {"LedgerEntryType": "RippleState",
+                      "FinalFields": {"HighLimit": {"currency": "USD", "issuer": GW_HIGH,
+                                                    "value": "0"},
+                                      "LowLimit": {"currency": "USD", "issuer": GW_LOW,
+                                                   "value": "10"}}}},
+    {"CreatedNode": {"LedgerEntryType": "MPTokenIssuance", "NewFields": {"Issuer": ISSUER}}},
+]}
+
+
+def test_affected_accounts_from_every_node_kind_and_field():
+    got = extract_affected_accounts(AFFECTED_META)
+    assert got == sorted({CAROL, ALICE, DAVE, BOB, GW_HIGH, GW_LOW, ISSUER})
+
+
+def test_affected_accounts_include_tx_account_and_destination_sorted_unique():
+    other = "rGWrZyQqhTp9Xu7G5Pkayo7bXjH4k4QYpf"
+    got = extract_affected_accounts({"AffectedNodes": []}, other, ALICE, ALICE)
+    assert got == sorted({other, ALICE})
+
+
+@pytest.mark.parametrize("value", [
+    "rA0",                                    # too short
+    "r" + "x" * 40,                           # too long
+    "X7AcgcsBL6XDcUb289X4mJ8djcdyKaB5hJDWMArnXr61cqZ",  # X-address, not classic
+    "B5F762798A53D543A014CAF8B297CFF8F2F937E8",          # hex, does not start with 'r'
+    12345, None, {"issuer": ALICE}, ["r" * 30],
+])
+def test_affected_accounts_ignore_values_that_are_not_classic_addresses(value):
+    meta = {"AffectedNodes": [{"ModifiedNode": {"FinalFields": {"Account": value}}}]}
+    assert extract_affected_accounts(meta, value) == []
+
+
+@pytest.mark.parametrize("meta", [
+    {}, {"AffectedNodes": "oops"}, {"AffectedNodes": [None, "x", {"ModifiedNode": None},
+                                                      {"ModifiedNode": {"FinalFields": "x"}},
+                                                      {"ModifiedNode": {"FinalFields":
+                                                                        {"HighLimit": "x"}}}]},
+])
+def test_affected_accounts_tolerate_malformed_meta(meta):
+    assert extract_affected_accounts(meta, ALICE) == [ALICE]
+
+
+def test_affected_accounts_on_tx_doc():
+    doc = one(payment(meta=AFFECTED_META))
+    assert doc["affected_accounts"] == sorted({CAROL, ALICE, DAVE, BOB, GW_HIGH, GW_LOW, ISSUER})
+
+
+def test_affected_accounts_without_meta_are_tx_parties():
+    doc = one({"hash": "H", "tx_json": {"Account": ALICE, "Destination": BOB}})
+    assert doc["affected_accounts"] == sorted([ALICE, BOB])
+
+
+def test_delivered_amount_xrp_converted_to_int_drops():
+    doc = one(payment(meta={"delivered_amount": "2500000"}))
+    assert doc["delivered_amount"] == 2500000
+    assert doc["delivered_xrp"] == Decimal128("2.500000") and doc["delivered_currency"] == "XRP"
+
+
+def test_delivered_amount_token_kept_as_object():
+    token = {"currency": "EUR", "issuer": ISSUER, "value": "0.25"}
+    doc = one(payment(meta={"delivered_amount": token}))
+    assert doc["delivered_amount"] == token
+    assert doc["delivered_currency"] == "EUR" and doc["delivered_issuer"] == ISSUER
+    assert doc["delivered_value"] == Decimal128("0.25") and "delivered_xrp" not in doc
+
+
+def test_delivered_amount_unavailable_kept_without_readable_fields():
+    doc = one(payment(meta={"delivered_amount": "unavailable"}))
+    assert doc["delivered_amount"] == "unavailable"
+    assert not [k for k in doc if k.startswith("delivered_") and k != "delivered_amount"]
+
+
+def test_delivered_amount_falls_back_to_binary_field_name():
+    doc = one(payment(meta={"DeliveredAmount": "7"}))
+    assert doc["delivered_amount"] == 7 and doc["delivered_xrp"] == Decimal128("0.000007")
+
+
+def test_delivered_amount_prefers_api_field_over_binary_field():
+    doc = one(payment(meta={"delivered_amount": "5", "DeliveredAmount": "7"}))
+    assert doc["delivered_amount"] == 5
+
+
+def test_no_delivered_amount_no_fields():
+    doc = one(payment())
+    assert not [k for k in doc if k.startswith("delivered")]
+
+
+@pytest.mark.parametrize("drops,xrp", [
+    ("1", "0.000001"), ("1000000", "1.000000"), ("2500001", "2.500001"),
+    ("100000000000000000", "100000000000.000000"),  # all XRP ever: still exact
+])
+def test_amount_xrp_is_exact_decimal128(drops, xrp):
+    doc = one(payment(drops))
+    assert isinstance(doc["amount_xrp"], Decimal128)
+    assert doc["amount_xrp"].to_decimal() == Decimal(xrp)
+    assert str(doc["amount_xrp"]) == xrp
+    assert doc["amount_currency"] == "XRP"
+    assert "amount_issuer" not in doc and "amount_value" not in doc
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("1.5", "1.5"), ("-0.000001", "-0.000001"), ("1000", "1000"),
+    ("9999999999999999e80", "9.999999999999999E+95"), ("1234567890123456e-96", None),
+])
+def test_amount_token_value_is_decimal128(value, expected):
+    doc = one(payment({"currency": "USD", "issuer": ISSUER, "value": value}))
+    assert doc["amount_currency"] == "USD" and doc["amount_issuer"] == ISSUER
+    assert isinstance(doc["amount_value"], Decimal128)
+    assert doc["amount_value"].to_decimal() == Decimal(value)
+    if expected:
+        assert str(doc["amount_value"]) == expected
+    assert "amount_xrp" not in doc
+
+
+def test_amount_readable_from_v2_deliver_max():
+    doc = one(payment(None, DeliverMax="3000000"))
+    assert doc["amount_xrp"] == Decimal128("3.000000") and doc["amount_currency"] == "XRP"
+
+
+def test_hex_currency_code_kept_as_is():
+    code = "0158415500000000C1F76FF6ECB0BAC600000000"
+    doc = one(payment({"currency": code, "issuer": ISSUER, "value": "1"}))
+    assert doc["amount_currency"] == code
+
+
+@pytest.mark.parametrize("value", ["abc", "NaN", "Infinity", "1_000", "", "1e99999", None, 5,
+                                   "1" * 40])
+def test_unparseable_token_value_omits_value_and_logs_debug(caplog, value):
+    with caplog.at_level("DEBUG", logger="xrpl_ingest.transform"):
+        doc = one(payment({"currency": "USD", "issuer": ISSUER, "value": value}))
+    assert "amount_value" not in doc
+    assert doc["amount_currency"] == "USD" and doc["amount_issuer"] == ISSUER
+    assert doc["Amount"]["value"] == value  # the raw amount is never touched
+    assert any(r.levelname == "DEBUG" and "amount_value" in r.getMessage() for r in caplog.records)
+
+
+def test_non_numeric_xrp_amount_has_no_readable_fields():
+    doc = one(payment("not-a-number"))
+    assert not [k for k in doc if k.startswith("amount_")]
+
+
+def test_readable_fields_never_float():
+    doc = one(payment("123", meta={"delivered_amount": {"currency": "USD", "issuer": ISSUER,
+                                                        "value": "0.1"}}))
+    assert not [k for k, v in doc.items() if isinstance(v, float)]
+
+
+def test_node_fields_with_derived_names_are_kept_under_raw():
+    tx = payment("10", meta={"delivered_amount": "10"}, affected_accounts="theirs",
+                 amount_xrp="theirs-too", _inserted_at="theirs-three")
+    doc = one(tx)
+    assert doc["_inserted_at"] == NOW and doc["raw__inserted_at"] == "theirs-three"
+    assert doc["affected_accounts"] == sorted([ALICE, BOB])
+    assert doc["raw_affected_accounts"] == "theirs"
+    assert doc["amount_xrp"] == Decimal128("0.000010") and doc["raw_amount_xrp"] == "theirs-too"
+
+
+def test_readable_fields_pure_helper():
+    assert readable_amount("amount", 10) == {"amount_xrp": Decimal128("0.000010"),
+                                             "amount_currency": "XRP"}
+    assert readable_amount("delivered", "unavailable") == {}
+    assert readable_amount("delivered", None) == {}
+    assert readable_amount("amount", True) == {}  # bool is not drops
+    mpt = readable_amount("amount", {"mpt_issuance_id": "00ABC", "value": "100"})
+    assert mpt == {"amount_value": Decimal128("100")}  # no currency/issuer to report

@@ -4,12 +4,18 @@ Handles both API v2 (tx_json + meta) and v1 (flat tx + metaData) shapes.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from decimal import Decimal, DecimalException
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+from bson.decimal128 import Decimal128
 
 from .constants import INT64_MAX, RIPPLE_EPOCH_OFFSET
 from .errors import MalformedLedger, NotValidated
+
+log = logging.getLogger(__name__)
 
 FIELD_RENAMES = {
     "ledger_index": "block_number",
@@ -52,6 +58,122 @@ def copy_deliver_max(doc: Dict[str, Any]) -> None:
     if "Amount" not in doc and "DeliverMax" in doc:
         dm = doc["DeliverMax"]
         doc["Amount"] = dict(dm) if isinstance(dm, dict) else dm
+
+
+# -- derived fields: affected_accounts, delivered_amount, readable amounts -------------------
+
+NODE_KINDS = ("CreatedNode", "ModifiedNode", "DeletedNode")
+NODE_FIELD_SETS = ("FinalFields", "NewFields", "PreviousFields")
+ADDRESS_FIELDS = ("Account", "Destination", "Owner", "Issuer")
+LIMIT_FIELDS = ("HighLimit", "LowLimit")  # RippleState: {currency, issuer, value}
+_DECIMAL_RE = re.compile(r"^-?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$")
+
+
+def is_classic_address(value: Any) -> bool:
+    """Shape check only (r..., 25-35 chars); no base58/checksum validation."""
+    return isinstance(value, str) and value.startswith("r") and 25 <= len(value) <= 35
+
+
+def _field_set_addresses(fields: Dict[str, Any]) -> Iterator[Any]:
+    for f in ADDRESS_FIELDS:
+        yield fields.get(f)
+    for f in LIMIT_FIELDS:
+        limit = fields.get(f)
+        if isinstance(limit, dict):
+            yield limit.get("issuer")
+
+
+def extract_affected_accounts(meta: Any, *also: Any) -> List[str]:
+    """Sorted unique classic addresses in meta.AffectedNodes (Created/Modified/Deleted;
+    FinalFields/NewFields/PreviousFields: Account, Destination, Owner, Issuer,
+    HighLimit.issuer, LowLimit.issuer), plus `also` (the tx Account/Destination)."""
+    found = {a for a in also if is_classic_address(a)}
+    nodes = meta.get("AffectedNodes") if isinstance(meta, dict) else None
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        for kind in NODE_KINDS:
+            body = node.get(kind)
+            if not isinstance(body, dict):
+                continue
+            for name in NODE_FIELD_SETS:
+                fields = body.get(name)
+                if isinstance(fields, dict):
+                    found.update(a for a in _field_set_addresses(fields) if is_classic_address(a))
+    return sorted(found)
+
+
+def delivered_amount(meta: Any) -> Any:
+    """meta.delivered_amount (API field), else meta.DeliveredAmount (binary field); None if
+    absent. "unavailable" (pre-2014 partial payments) is returned as-is."""
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("delivered_amount")
+    return meta.get("DeliveredAmount") if value is None else value
+
+
+def drops_to_xrp(drops: Any) -> Optional[Decimal128]:
+    """Exact XRP (drops / 10^6) as Decimal128; None for anything that is not integer drops."""
+    if isinstance(drops, bool):
+        return None
+    if isinstance(drops, int):
+        text = str(drops)
+    elif isinstance(drops, str) and _INT_RE.match(drops):
+        text = drops
+    else:
+        return None
+    try:
+        return Decimal128(Decimal(f"{text}E-6"))  # parsed from text: exact, no float
+    except DecimalException:
+        return None
+
+
+def token_value(value: Any) -> Optional[Decimal128]:
+    """Issued-token value string ("1.5", "9999999999999999e80") as Decimal128; else None."""
+    if not isinstance(value, str) or not _DECIMAL_RE.match(value):
+        return None
+    try:
+        return Decimal128(Decimal(value))
+    except DecimalException:  # > 34 digits or exponent out of range
+        return None
+
+
+def readable_amount(prefix: str, amount: Any, tx_hash: Any = None) -> Dict[str, Any]:
+    """`<prefix>_xrp`, `_currency`, `_issuer`, `_value` for an amount (int drops, drops
+    string or {currency, issuer, value}). Never float. Unusable parts are left out."""
+    xrp = drops_to_xrp(amount)
+    if xrp is not None:
+        return {f"{prefix}_xrp": xrp, f"{prefix}_currency": "XRP"}
+    if not isinstance(amount, dict):
+        if amount is not None and not isinstance(amount, bool) and amount != "unavailable":
+            log.debug("tx %s: %s amount %r is not drops or an object; no readable fields",
+                      tx_hash, prefix, amount)
+        return {}
+    out: Dict[str, Any] = {}
+    for part in ("currency", "issuer"):
+        if isinstance(amount.get(part), str):
+            out[f"{prefix}_{part}"] = amount[part]
+    value = token_value(amount.get("value"))
+    if value is None:
+        log.debug("tx %s: %s value %r is not a decimal number; %s_value omitted",
+                  tx_hash, prefix, amount.get("value"), prefix)
+    else:
+        out[f"{prefix}_value"] = value
+    return out
+
+
+def derived_tx_fields(doc: Dict[str, Any], meta: Any) -> Dict[str, Any]:
+    """New tx-doc fields computed from the (already converted) doc and its meta."""
+    tx_hash = doc.get("hash")
+    out: Dict[str, Any] = {"affected_accounts": extract_affected_accounts(
+        meta, doc.get("from_address"), doc.get("to_address"))}
+    delivered = delivered_amount(meta)
+    if delivered is not None:
+        out["delivered_amount"] = to_int(delivered) if isinstance(delivered, str) \
+            else escape_keys(delivered)
+    out.update(readable_amount("amount", doc.get("Amount"), tx_hash))
+    out.update(readable_amount("delivered", out.get("delivered_amount"), tx_hash))
+    return out
 
 
 def _require(ledger: Dict[str, Any], key: str, index: int) -> Any:
@@ -127,6 +249,16 @@ def merge_field(doc: Dict[str, Any], key: Any, value: Any,
             return
         if same_value(doc[raw], value):
             return
+
+
+def put_derived(doc: Dict[str, Any], key: str, value: Any) -> None:
+    """Set a field we compute. A node field already using that name moves to raw_<key>."""
+    if key in doc:
+        received = doc.pop(key)
+        doc[key] = value
+        merge_field(doc, key, received, {})
+    else:
+        doc[key] = value
 
 
 def build_ledger_doc(index: int, ledger: Dict[str, Any], num_transactions: int,
@@ -210,8 +342,10 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
         for field in AMOUNT_FIELDS:
             if isinstance(doc.get(field), str):
                 doc[field] = to_int(doc[field])
+        for k, v in derived_tx_fields(doc, meta).items():
+            put_derived(doc, k, v)
 
-        doc["_inserted_at"] = now
+        put_derived(doc, "_inserted_at", now)
         tx_docs.append(doc)
 
         body = tx_json if tx_json is not None else tx

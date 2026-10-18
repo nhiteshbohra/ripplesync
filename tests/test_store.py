@@ -14,6 +14,24 @@ def test_indexes_created(store):
         assert coll.index_information()[name].get("unique") is True, (coll.name, name)
 
 
+def test_affected_accounts_multikey_index(store):
+    info = store.txs.index_information()["affected_accounts_1"]
+    assert info["key"] == [("affected_accounts", 1)] and not info.get("unique")
+
+
+def test_new_tx_fields_roundtrip_and_query(store):
+    from bson.decimal128 import Decimal128
+    a, b = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh", "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
+    result = make_result(1, 1)
+    tx = result["ledger"]["transactions"][0]
+    tx["tx_json"].update(Account=a, Destination=b)
+    tx["meta"]["delivered_amount"] = "1000000"
+    store.save_ledger_bundle(*parse_ledger_result(1, result, NOW))
+    doc = store.txs.find_one({"affected_accounts": b})
+    assert doc["affected_accounts"] == sorted([a, b])
+    assert doc["delivered_xrp"] == Decimal128("1.000000") and doc["delivered_amount"] == 1000000
+
+
 def test_save_is_idempotent_and_replaces(store):
     store.save_ledger_bundle(*bundle(1))
     store.save_ledger_bundle(*bundle(1))
