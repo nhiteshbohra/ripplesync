@@ -313,7 +313,7 @@ class InstantPool:
     'dies' (BrokenProcessPool), like the OOM case, in the same batch as finished chunks."""
     BAD = POOL_LO + 10
 
-    def __init__(self, max_workers, mp_context):
+    def __init__(self, max_workers, mp_context, **kw):
         pass
 
     def __enter__(self):
@@ -332,7 +332,7 @@ class InstantPool:
         return fut
 
 
-def broken_first(fs, return_when):
+def broken_first(fs, return_when, timeout=None):
     """wait() stand-in returning the whole batch, the broken future first."""
     return sorted(fs, key=lambda f: f.exception() is None), set()
 
@@ -348,22 +348,122 @@ def test_pool_broken_batch_keeps_results_of_chunks_that_finished(cfg, store, mon
     assert summary["chunks_incomplete"] == 8 - 3
 
 
-def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path):
+@pytest.mark.parametrize("content", ["current_process=0", "backfill=0", "BACKFILL = 0  # pause"])
+def test_pool_stop_flag_cancels_remaining_chunks(cfg, store, tmp_path, content):
     flag = tmp_path / "s.txt"
-    flag.write_text("current_process=0")
+    flag.write_text(content)
     summary = pool_run(cfg, store, process_status_file=str(flag))
-    # only the chunk already handed to each of the 2 workers runs; old code ran all 8
-    assert summary["chunks_run"] == 2
-    assert summary["chunks_incomplete"] == summary["chunks_run"]
+    # the parent sees the stop before handing out any chunk; old code ran all 8
+    assert summary["chunks_run"] == 0
+    assert summary["chunks_incomplete"] == 8  # never started: counted, so the exit code is 1
     assert store.done_chunks(POOL_LO, POOL_HI) == set()
+
+
+def test_pool_other_commands_stop_key_does_not_stop_backfill(cfg, store, tmp_path, monkeypatch):
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
+    flag = tmp_path / "s.txt"
+    flag.write_text("tail=0\nretry-failed=0\n")
+    summary = pool_run(cfg, store, process_status_file=str(flag))
+    assert summary["chunks_run"] == 8 and summary["chunks_incomplete"] == 0
+
+
+def _signal_after_first_check():
+    calls = []
+
+    def stop_signalled():
+        calls.append(1)
+        return len(calls) > 1  # SIGTERM / Ctrl+C reached the parent after the first window
+    return stop_signalled
 
 
 def test_pool_parent_stops_submitting_after_sigterm(cfg, store, monkeypatch):
     monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
-    monkeypatch.setattr(backfill, "stop_signalled", lambda: True)  # SIGTERM reached the parent
+    monkeypatch.setattr(backfill, "stop_signalled", _signal_after_first_check())
     summary = pool_run(cfg, store)
     assert summary["chunks_run"] == 2  # the in-flight ones finish, nothing new starts
     assert summary["chunks_incomplete"] == 6  # never started: counted, so the exit code is 1
+
+
+def _slow_chunk_until_stopped(args):
+    """Pool worker: runs until the parent sets the shared stop event (or 30 s)."""
+    import time
+    cfg, chunk = args
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if backfill._worker_stop_event is not None and backfill._worker_stop_event.is_set():
+            return ChunkResult(chunk, completed=False)
+        time.sleep(0.02)
+    return ChunkResult(chunk, ok=chunk[1] - chunk[0] + 1)
+
+
+def test_pool_parent_stop_reaches_workers_through_shared_event(cfg, store, monkeypatch, tmp_path):
+    """Workers ignore SIGINT and never read a stop the parent got by signal; the parent
+    tells them through the initializer's Event. Old code: workers ran their chunk to the end."""
+    import time
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _slow_chunk_until_stopped)
+    monkeypatch.setattr(backfill, "stop_signalled", _signal_after_first_check())
+    t0 = time.monotonic()
+    summary = pool_run(cfg, store)
+    assert time.monotonic() - t0 < 25
+    assert summary["chunks_run"] == 2 and summary["chunks_incomplete"] == 8
+
+
+def test_pool_second_ctrl_c_terminates_workers_and_raises(cfg, store, monkeypatch):
+    import time
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _slow_chunk_until_stopped)
+    real_wait = backfill.wait
+    calls = []
+
+    def wait_then_interrupt(fs, timeout=None, return_when=None):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt  # what the second Ctrl+C does in the parent
+        return real_wait(fs, timeout=timeout, return_when=return_when)
+    monkeypatch.setattr(backfill, "wait", wait_then_interrupt)
+    t0 = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        pool_run(cfg, store)
+    assert time.monotonic() - t0 < 20  # did not wait for the 30 s chunks
+
+
+def test_pool_logs_progress_line_with_eta(cfg, store, monkeypatch, caplog):
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
+    with caplog.at_level("INFO", logger="xrpl_ingest.backfill"):
+        pool_run(cfg, store)
+    lines = [m for m in caplog.messages if "chunks " in m and "ledgers/s" in m]
+    assert len(lines) == 8 and "chunks 8/8 (100.0%)" in lines[-1] and "ETA 0s" in lines[-1]
+
+
+def test_pool_low_disk_stops_like_the_stop_file(cfg, store, monkeypatch):
+    calls = []
+
+    def db_stats():
+        calls.append(1)
+        free = 50 if len(calls) == 1 else 1  # start check ok, then the disk fills up
+        return {"fsTotalSize": 100 * 1024 ** 3, "fsUsedSize": (100 - free) * 1024 ** 3}
+    monkeypatch.setattr(store, "db_stats", db_stats, raising=False)
+    monkeypatch.setattr(backfill.DiskGuard, "__init__", _guard_no_interval)
+    monkeypatch.setattr(backfill, "_run_chunk_in_process", _ok_chunk)
+    summary = pool_run(cfg, store, min_free_gb=10)
+    assert summary["low_disk"] is True and summary["chunks_incomplete"] > 0
+
+
+def test_backfill_refuses_to_start_on_low_disk(cfg, store, monkeypatch):
+    from xrpl_ingest.diskspace import LowDiskSpace
+    monkeypatch.setattr(store, "db_stats", lambda: {"fsTotalSize": 10 * 1024 ** 3,
+                                                    "fsUsedSize": 9.5 * 1024 ** 3}, raising=False)
+    src = FakeSource(latest=POOL_HI, ranges=f"{POOL_LO}-{POOL_HI}")
+    with pytest.raises(LowDiskSpace, match="MIN_FREE_GB=1"):
+        run_backfill(dataclasses.replace(cfg, min_free_gb=1), POOL_LO, POOL_HI, source=src,
+                     store=store, inline=True)
+    assert src.calls == []
+
+
+_real_guard_init = backfill.DiskGuard.__init__
+
+
+def _guard_no_interval(self, store, min_free_gb, **kw):
+    _real_guard_init(self, store, min_free_gb, interval=0)
 
 
 def test_sigterm_mid_chunk_stops_inline_backfill_unmarked(cfg, store):
@@ -382,6 +482,7 @@ def test_sigterm_mid_chunk_stops_inline_backfill_unmarked(cfg, store):
 
 
 def test_backfill_sources_get_the_stop_check(cfg, store, tmp_path, monkeypatch):
+    monkeypatch.setattr(stopflag, "CHECK_INTERVAL", 0)  # re-read the file on every check
     flag = tmp_path / "s.txt"
     cfg = dataclasses.replace(cfg, process_status_file=str(flag))
     seen = []

@@ -7,6 +7,7 @@ Run only these: `python -m pytest -m integration`.
 """
 import dataclasses
 import os
+import re
 import uuid
 
 import pytest
@@ -17,6 +18,7 @@ from fake_xrpld import FakeXrpld, tx_count
 from xrpl_ingest.backfill import run_backfill
 from xrpl_ingest.cli import _verify, backfill_exit_code
 from xrpl_ingest.config import Config
+from xrpl_ingest.logsetup import setup_logging
 from xrpl_ingest.store import MongoStore
 
 pytestmark = pytest.mark.integration
@@ -60,13 +62,21 @@ def cfg(node, tmp_path):
         client.close()
 
 
-def test_backfill_spawn_pool_then_rerun_and_verify(cfg, capfd):
+def test_backfill_spawn_pool_then_rerun_and_verify(cfg, capfd, restore_logging, tmp_path):
     hi = LO + 29
+    log_file = tmp_path / "logs" / "ingest.log"
+    setup_logging("INFO", str(log_file))  # what the CLI does in the parent
     first = run_backfill(cfg, LO, hi)
     assert (first["chunks_run"], first["ledgers_ok"], first["ledgers_failed"]) == (3, 30, 0)
     assert backfill_exit_code(first) == 0
-    # workers configure logging themselves (spawn children inherit none): formatted INFO
-    assert " INFO xrpl_ingest.source: connected to ws://127.0.0.1:" in capfd.readouterr().err
+    # worker records travel through the queue to the parent's handlers: stderr and LOG_FILE,
+    # UTC timestamps with Z
+    err = capfd.readouterr().err
+    assert re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z INFO xrpl_ingest.source: "
+                     r"connected to ws://127\.0\.0\.1:", err), err[-2000:]
+    text = log_file.read_text(encoding="utf-8")
+    assert "xrpl_ingest.source: connected to ws://127.0.0.1:" in text
+    assert "chunks 3/3 (100.0%)" in text
 
     again = run_backfill(cfg, LO, hi)
     assert again["chunks_run"] == 0 and backfill_exit_code(again) == 0  # resumed: nothing to do
