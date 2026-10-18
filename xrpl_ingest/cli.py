@@ -173,6 +173,20 @@ def add_data_parsers(sub, verify: argparse.ArgumentParser) -> None:
     f.add_argument("--ledger", type=ledger_arg, required=True, metavar="N|validated",
                    help="ledger number, or 'validated' for the node's latest validated ledger")
 
+    t = sub.add_parser("tx", help="spot-check one stored transaction against the node",
+                       epilog="exit codes: 0 same; 1 different, not validated, or missing "
+                              "(stored or on the node); 2 usage; 4 node or MongoDB unreachable")
+    t.add_argument("--hash", type=tx_hash_arg, required=True, dest="tx_hash", metavar="H",
+                   help="64-hex-digit transaction hash")
+
+
+def tx_hash_arg(text: str) -> str:
+    from .repair import normalize_tx_hash
+    try:
+        return normalize_tx_hash(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
 
 def ledger_arg(text: str):
     """argparse type for fetch --ledger: 'validated' or a ledger number >= FIRST_LEDGER."""
@@ -269,4 +283,41 @@ async def _verify_with_node(cfg: Config, store: MongoStore, start: int, end: int
     return error_exit_code(node_error) if node_error is not None else 0
 
 
-DATA_COMMANDS = {"verify": _verify_cmd, "fetch": _fetch_cmd}
+def _tx_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
+    return asyncio.run(_tx(cfg, store, args.tx_hash, stop))
+
+
+async def _tx(cfg: Config, store: MongoStore, tx_hash: str, stop) -> int:
+    from .errors import RpcError
+    from .repair import describe_tx, diff_tx_fields, node_tx_fields, stored_tx_fields
+    stored = await asyncio.to_thread(store.find_tx, tx_hash)
+    source = WsSource.from_config(cfg, stop_check=stop)
+    try:
+        node: Optional[dict] = await source.get_tx(tx_hash)
+    except RpcError as e:
+        if e.error != "txnNotFound":
+            raise  # main(): exit 4
+        node = None
+    finally:
+        await source.close()
+    print(f"tx {tx_hash}")
+    if stored is None:
+        print("stored: not found")
+    if node is None:
+        print("node:   not found (txnNotFound)")
+    if stored is None or node is None:
+        return 1
+    mine, theirs = stored_tx_fields(stored), node_tx_fields(node)
+    print(f"stored: {describe_tx(mine)}")
+    print(f"node:   {describe_tx(theirs)}")
+    diffs = diff_tx_fields(mine, theirs)
+    for field, a, b in diffs:
+        print(f"  {field}: stored {a!r}, node {b!r}")
+    validated = node.get("validated") is True
+    if not validated:
+        print("node reports the transaction as not validated")
+    print("same" if not diffs and validated else f"different ({len(diffs)} field(s))")
+    return 0 if not diffs and validated else 1
+
+
+DATA_COMMANDS = {"verify": _verify_cmd, "fetch": _fetch_cmd, "tx": _tx_cmd}

@@ -135,6 +135,13 @@ def test_deep_verify_queries(store):
     assert store.tx_hashes(2) == {"H2_0", "H2_1"} and store.tx_hashes(4) == set()
 
 
+def test_find_tx(store):
+    store.save_ledger_bundle(*bundle(4))
+    doc = store.find_tx("H4_1")
+    assert doc["block_number"] == 4 and "_id" not in doc
+    assert store.find_tx("nope") is None
+
+
 def test_stats(store):
     store.save_ledger_bundle(*bundle(1))
     s = store.stats()

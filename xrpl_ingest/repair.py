@@ -1,4 +1,5 @@
 """verify --repair / --deep: find bad ledgers in a stored range and (optionally) re-ingest them.
+Also the pure comparison behind `tx --hash` (stored tx vs node, at the end).
 
 Checks, window by window (VERIFY_WINDOW ledgers, so memory stays bounded for any range):
 - always: missing ledger documents (gaps) and stored tx count != num_transactions;
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
                     Tuple)
@@ -340,3 +342,57 @@ async def _repair_window(source: Any, store: Any, a: int, b: int, w: _Window, to
         emit(describe_diff(d) + " (after repair)")
     s.remaining += again.count()
     return stopped
+
+
+# -- tx spot check (`tx --hash H`): stored tx doc vs the node's `tx` result -------------------
+
+# Amount = Amount, else DeliverMax (API v2 Payments have only DeliverMax), on both sides
+TX_KEY_FIELDS = ("TransactionType", "Account", "Destination", "Amount", "Fee", "ledger_index",
+                 "TransactionResult")
+_TX_HASH_RE = re.compile(r"^[0-9A-Fa-f]{64}$")
+
+
+def normalize_tx_hash(text: str) -> str:
+    """64 hex digits, returned upper-case (as xrpld writes hashes). Else ValueError."""
+    t = text.strip()
+    if not _TX_HASH_RE.match(t):
+        raise ValueError(f"expected a 64-hex-digit transaction hash, got {text!r}")
+    return t.upper()
+
+
+def _norm(value: Any) -> Any:
+    return to_int(value) if isinstance(value, str) else value
+
+
+def stored_tx_fields(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Key fields of a stored tx doc, under the node's field names."""
+    return {k: _norm(v) for k, v in {
+        "TransactionType": doc.get("TransactionType"), "Account": doc.get("from_address"),
+        "Destination": doc.get("to_address"),
+        "Amount": doc.get("Amount", doc.get("DeliverMax")), "Fee": doc.get("Fee"),
+        "ledger_index": doc.get("block_number"), "TransactionResult": doc.get("result"),
+    }.items()}
+
+
+def node_tx_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Key fields of a `tx` result: API v2 (tx_json + meta) or v1 (flat + meta)."""
+    body = result.get("tx_json") if isinstance(result.get("tx_json"), dict) else result
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    return {k: _norm(v) for k, v in {
+        "TransactionType": body.get("TransactionType"), "Account": body.get("Account"),
+        "Destination": body.get("Destination"),
+        "Amount": body.get("Amount", body.get("DeliverMax")), "Fee": body.get("Fee"),
+        "ledger_index": result.get("ledger_index", body.get("ledger_index")),
+        "TransactionResult": meta.get("TransactionResult"),
+    }.items()}
+
+
+def diff_tx_fields(stored: Dict[str, Any], node: Dict[str, Any]) -> List[Tuple[str, Any, Any]]:
+    return [(k, stored.get(k), node.get(k)) for k in TX_KEY_FIELDS
+            if stored.get(k) != node.get(k)]
+
+
+def describe_tx(f: Dict[str, Any]) -> str:
+    return (f"ledger {f['ledger_index']} {f['TransactionType']} {f['Account']} -> "
+            f"{f['Destination']} amount {f['Amount']!r} fee {f['Fee']} "
+            f"result {f['TransactionResult']}")

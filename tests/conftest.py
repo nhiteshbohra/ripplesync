@@ -111,6 +111,15 @@ class FakeSource:
         return {"ledger": {"ledger_index": index, "transactions": list(outcome)},
                 "ledger_index": index, "validated": True}
 
+    async def get_tx(self, tx_hash):
+        """`tx_script[hash]`: list of outcomes (result dict or Exception). Default: not found."""
+        from xrpl_ingest.errors import RpcError
+        queue = getattr(self, "tx_script", {}).get(tx_hash)
+        outcome = queue.pop(0) if queue else RpcError("txnNotFound")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
 
 class FakeWs:
     """Fake websocket. `handler(request_dict)` returns a response dict, None (never answer),

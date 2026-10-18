@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne
 
@@ -183,6 +183,9 @@ class MongoStore:
         """Hashes of the stored transactions of one ledger."""
         return {d["hash"] for d in self.txs.find({"block_number": block_number},
                                                  {"hash": 1, "_id": 0}) if "hash" in d}
+
+    def find_tx(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        return self.txs.find_one({"hash": tx_hash}, {"_id": 0})
 
     def stats(self) -> Dict[str, Any]:
         return {

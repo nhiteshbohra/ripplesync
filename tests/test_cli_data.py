@@ -193,3 +193,85 @@ def test_fetch_exit_code(error, recorded, code):
     from xrpl_ingest.fetcher import IngestResult
     r = IngestResult(L, error is None, 0, error=error, recorded=recorded)
     assert cli.fetch_exit_code(r) == code
+
+
+# -- tx --hash ------------------------------------------------------------------------------
+
+TXH = "C0FFEE" + "0" * 58
+ALICE = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
+BOB = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
+
+
+def store_v2_payment(store, ledger=L):
+    """A v2-shaped Payment (DeliverMax, no Amount) stored through the normal transform."""
+    result = make_result(ledger, 1)
+    tx = result["ledger"]["transactions"][0]
+    tx["hash"] = TXH
+    body = tx["tx_json"]
+    del body["Amount"]
+    body.update(Account=ALICE, Destination=BOB, DeliverMax="1000000")
+    store.save_ledger_bundle(*parse_ledger_result(ledger, result, NOW))
+
+
+def node_tx(ledger=L, validated=True, **changes):
+    body = {"Account": ALICE, "Destination": BOB, "DeliverMax": "1000000", "Fee": "12",
+            "Sequence": 0, "TransactionType": "Payment", **changes}
+    return {"tx_json": body, "meta": {"TransactionResult": "tesSUCCESS", "TransactionIndex": 0},
+            "hash": TXH, "ledger_index": ledger, "validated": validated}
+
+
+def test_tx_same_exits_0(cli_main, node, store, capsys):
+    store_v2_payment(store)
+    node.tx_script = {TXH: [node_tx()]}
+    assert cli_main(["tx", "--hash", TXH.lower()]) == 0  # lower-case input accepted
+    out = capsys.readouterr().out
+    assert f"tx {TXH}" in out and out.rstrip().endswith("same")
+    assert f"stored: ledger {L} Payment {ALICE} -> {BOB} amount 1000000 fee 12" in out
+
+
+def test_tx_different_exits_1_with_diff(cli_main, node, store, capsys):
+    store_v2_payment(store)
+    node.tx_script = {TXH: [node_tx(ledger=L + 1, Fee="15")]}
+    assert cli_main(["tx", "--hash", TXH]) == 1
+    out = capsys.readouterr().out
+    assert "  Fee: stored 12, node 15" in out and f"  ledger_index: stored {L}, node {L + 1}" in out
+    assert "different (2 field(s))" in out
+
+
+def test_tx_not_validated_on_node_exits_1(cli_main, node, store, capsys):
+    store_v2_payment(store)
+    node.tx_script = {TXH: [node_tx(validated=False)]}
+    assert cli_main(["tx", "--hash", TXH]) == 1
+    assert "not validated" in capsys.readouterr().out
+
+
+def test_tx_missing_in_store_exits_1(cli_main, node, store, capsys):
+    node.tx_script = {TXH: [node_tx()]}
+    assert cli_main(["tx", "--hash", TXH]) == 1
+    assert "stored: not found" in capsys.readouterr().out
+
+
+def test_tx_missing_on_node_exits_1(cli_main, node, store, capsys):
+    store_v2_payment(store)  # FakeSource default: txnNotFound
+    assert cli_main(["tx", "--hash", TXH]) == 1
+    assert "node:   not found (txnNotFound)" in capsys.readouterr().out
+
+
+def test_tx_node_unreachable_exits_4(cli_main, monkeypatch, store):
+    class Unreachable(DeadNode):
+        async def get_tx(self, tx_hash):
+            raise ConnectFailed("all servers failed: refused")
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: Unreachable())
+    assert cli_main(["tx", "--hash", TXH]) == 4
+
+
+def test_tx_other_node_error_exits_4(cli_main, node, store):
+    node.tx_script = {TXH: [RpcError("tooBusy")]}
+    assert cli_main(["tx", "--hash", TXH]) == 4
+
+
+@pytest.mark.parametrize("value", ["", "xyz", "A" * 63, "A" * 65, "G" * 64])
+def test_tx_bad_hash_exits_2(cli_main, node, capsys, value):
+    with pytest.raises(SystemExit) as e:
+        cli_main(["tx", "--hash", value])
+    assert e.value.code == 2 and "64-hex-digit" in capsys.readouterr().err

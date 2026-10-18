@@ -252,3 +252,7 @@ class WsSource:
     async def get_ledger_hashes(self, index: int) -> Dict[str, Any]:
         """`ledger` with the transaction hash list only (expand=false)."""
         return await self.request("ledger", ledger_index=index, transactions=True, expand=False)
+
+    async def get_tx(self, tx_hash: str) -> Dict[str, Any]:
+        """`tx` lookup by hash, JSON (not binary)."""
+        return await self.request("tx", transaction=tx_hash, binary=False)

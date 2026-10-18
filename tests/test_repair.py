@@ -5,9 +5,10 @@ import pytest
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
 from xrpl_ingest.errors import MalformedLedger, NotValidated, RequestTimeout, RpcError
 from xrpl_ingest.repair import (ChainBreak, HashDiff, RepairSummary, describe_diff,
-                                describe_problems, diff_hashes, find_chain_breaks,
-                                ledgers_to_repair, node_tx_hashes, on_node, repair_range,
-                                windows)
+                                describe_problems, describe_tx, diff_hashes, diff_tx_fields,
+                                find_chain_breaks, ledgers_to_repair, node_tx_fields,
+                                node_tx_hashes, normalize_tx_hash, on_node, repair_range,
+                                stored_tx_fields, windows)
 from xrpl_ingest.transform import parse_ledger_result
 
 
@@ -268,3 +269,47 @@ def test_deep_stop_during_comparison(store):
 
     s, lines = deep(FakeSource(), store, 1, 10, stop=stop, concurrency=1)
     assert s.stopped and not s.ok and "stop requested; ended early" in lines
+
+
+# -- tx spot check ---------------------------------------------------------------------------
+
+HX = "ab" * 32
+
+
+def test_normalize_tx_hash():
+    assert normalize_tx_hash(f" {HX} ") == HX.upper()
+    for bad in ["", "AB" * 31, "AB" * 33, "G" * 64, "0x" + "A" * 62]:
+        with pytest.raises(ValueError, match="64-hex-digit"):
+            normalize_tx_hash(bad)
+
+
+V2_NODE_TX = {"tx_json": {"Account": "rA", "Destination": "rB", "DeliverMax": "5", "Fee": "12",
+                          "TransactionType": "Payment"},
+              "meta": {"TransactionResult": "tesSUCCESS"}, "hash": HX.upper(),
+              "ledger_index": 9, "validated": True}
+
+
+def test_node_tx_fields_v2_and_v1():
+    want = {"TransactionType": "Payment", "Account": "rA", "Destination": "rB", "Amount": 5,
+            "Fee": 12, "ledger_index": 9, "TransactionResult": "tesSUCCESS"}
+    assert node_tx_fields(V2_NODE_TX) == want
+    v1 = {"Account": "rA", "Destination": "rB", "Amount": "5", "Fee": "12",
+          "TransactionType": "Payment", "ledger_index": 9,
+          "meta": {"TransactionResult": "tesSUCCESS"}}
+    assert node_tx_fields(v1) == want
+
+
+def test_stored_tx_fields_and_diff():
+    doc = {"TransactionType": "Payment", "from_address": "rA", "to_address": "rB",
+           "Amount": 5, "DeliverMax": 5, "Fee": 12, "block_number": 9, "result": "tesSUCCESS"}
+    assert diff_tx_fields(stored_tx_fields(doc), node_tx_fields(V2_NODE_TX)) == []
+    doc.update(Fee=10, result="tecPATH_DRY")
+    assert diff_tx_fields(stored_tx_fields(doc), node_tx_fields(V2_NODE_TX)) == [
+        ("Fee", 10, 12), ("TransactionResult", "tecPATH_DRY", "tesSUCCESS")]
+
+
+def test_stored_v1_amount_matches_node_v2_deliver_max():
+    doc = {"TransactionType": "Payment", "from_address": "rA", "to_address": "rB",
+           "Amount": 5, "Fee": 12, "block_number": 9, "result": "tesSUCCESS"}  # no DeliverMax
+    assert diff_tx_fields(stored_tx_fields(doc), node_tx_fields(V2_NODE_TX)) == []
+    assert "Payment rA -> rB amount 5 fee 12" in describe_tx(stored_tx_fields(doc))
