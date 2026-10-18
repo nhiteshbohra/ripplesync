@@ -95,3 +95,24 @@ def test_oversized_ledger_failure_records_websocket_1009_reason(cfg, node):
         assert store.done_chunks(LO, LO + 29) == {(LO + 20, LO + 29)}  # recorded => marked
     finally:
         store.close()
+
+
+def test_lossless_bundle_roundtrips_through_real_mongodb(cfg):
+    """Escaped awkward keys ('.', leading '$') and unmapped fields survive a real write."""
+    from conftest import NOW
+    from test_lossless import INDEX, leaves, recoverable, v2_ledger_result
+    from xrpl_ingest.transform import parse_ledger_result
+
+    raw = v2_ledger_result()
+    store = MongoStore.from_config(cfg)
+    try:
+        store.ensure_indexes()
+        store.save_ledger_bundle(*parse_ledger_result(INDEX, raw, NOW))
+        ledger_doc = store.ledgers.find_one({"block_number": INDEX}, {"_id": 0})
+        hashes = [t["hash"] for t in raw["ledger"]["transactions"]]
+        txs = [store.txs.find_one({"hash": h}, {"_id": 0}) for h in hashes]
+        metas = [store.metas.find_one({"transaction_hash": h}, {"_id": 0}) for h in hashes]
+        lost = [(p, v) for p, v in leaves(raw) if not recoverable(p, v, ledger_doc, txs, metas)]
+        assert lost == []
+    finally:
+        store.close()

@@ -61,10 +61,80 @@ def _require(ledger: Dict[str, Any], key: str, index: int) -> Any:
     return value
 
 
+# -- lossless storage -----------------------------------------------------------------------
+# Every field the node sends is stored. Mapped fields keep their names/conversions; every
+# other field is stored as received under its own name. When that name is already taken in
+# the document by a different value, the received value goes to raw_<key> (raw_raw_<key>, ...
+# if that is taken too). An identical value is not stored twice. Keys Mongo cannot hold are
+# escaped (see escape_key).
+
+RAW_PREFIX = "raw_"
+RESERVED_KEYS = frozenset({"_id"})  # a node field may never become the Mongo _id
+LEDGER_RENAMES = {"ledger_index": "block_number", "ledger_hash": "block_hash"}
+_KEY_ESCAPES = (("\x00", "␀"), (".", "．"))  # NUL -> '␀', '.' -> fullwidth '．'
+_DOLLAR, _DOLLAR_ESCAPED = "$", "＄"  # leading '$' -> fullwidth '＄'
+
+
+def escape_key(key: Any) -> str:
+    """Mongo field names must not contain '.' or NUL nor start with '$': such a key would make
+    the whole write fail. Replaced by look-alike characters (reversed by unescape_key)."""
+    key = key if isinstance(key, str) else str(key)
+    for raw, escaped in _KEY_ESCAPES:
+        key = key.replace(raw, escaped)
+    return _DOLLAR_ESCAPED + key[1:] if key.startswith(_DOLLAR) else key
+
+
+def unescape_key(key: str) -> str:
+    if key.startswith(_DOLLAR_ESCAPED):
+        key = _DOLLAR + key[1:]
+    for raw, escaped in _KEY_ESCAPES:
+        key = key.replace(escaped, raw)
+    return key
+
+
+def escape_keys(value: Any) -> Any:
+    """Deep copy of dicts/lists with every key escaped; other values unchanged."""
+    if isinstance(value, dict):
+        return {escape_key(k): escape_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [escape_keys(v) for v in value]
+    return value
+
+
+def same_value(stored: Any, received: Any) -> bool:
+    """True when `received` adds nothing to `stored` (equal, or equal after our int coercion).
+    bool/float compare type-strictly: True == 1 == 1.0 in Python, not in the data."""
+    if isinstance(stored, (bool, float)) or isinstance(received, (bool, float)):
+        return type(stored) is type(received) and stored == received
+    return stored == received or stored == to_int(received)
+
+
+def merge_field(doc: Dict[str, Any], key: Any, value: Any,
+                renames: Dict[str, str] = FIELD_RENAMES) -> None:
+    """Store a field received from the node in `doc` without losing it (rule above)."""
+    value = escape_keys(value)
+    name = escape_key(renames.get(key, key))
+    if name not in doc and name not in RESERVED_KEYS:
+        doc[name] = value
+        return
+    if name in doc and same_value(doc[name], value):
+        return
+    raw = escape_key(key)
+    while True:
+        raw = RAW_PREFIX + raw
+        if raw not in doc:
+            doc[raw] = value
+            return
+        if same_value(doc[raw], value):
+            return
+
+
 def build_ledger_doc(index: int, ledger: Dict[str, Any], num_transactions: int,
                      now: datetime) -> Dict[str, Any]:
+    """Mapped header fields, then every other field of `ledger` except `transactions`
+    (stored per transaction), losslessly."""
     block_hash = _require(ledger, "ledger_hash", index)
-    return {
+    doc = {
         "block_number": index,
         "block_hash": str(block_hash),
         "close_time": to_int(ledger.get("close_time", 0)) or 0,
@@ -77,6 +147,16 @@ def build_ledger_doc(index: int, ledger: Dict[str, Any], num_transactions: int,
         "num_transactions": num_transactions,
         "_inserted_at": now,
     }
+    for k, v in ledger.items():
+        if k != "transactions":
+            merge_field(doc, k, v, LEDGER_RENAMES)
+    return doc
+
+
+def _meta_key(tx: Dict[str, Any]) -> Optional[str]:
+    """'meta' (v2) or 'metaData' (v1): the first non-empty object, else the first object."""
+    keys = [k for k in ("meta", "metaData") if isinstance(tx.get(k), dict)]
+    return next((k for k in keys if tx[k]), keys[0] if keys else None)
 
 
 def flatten_transactions(block_number: int, block_hash: str, close_time: int,
@@ -92,8 +172,12 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             # expand=False would give bare hashes; we always request expand=True.
             raise MalformedLedger(f"ledger {block_number}: transaction is not an object: {tx!r}")
 
-        meta = tx.get("meta") or tx.get("metaData") or {}
+        meta_key = _meta_key(tx)
+        meta = tx[meta_key] if meta_key else {}
         tx_json = tx.get("tx_json") if isinstance(tx.get("tx_json"), dict) else None
+        # stored elsewhere: meta in the meta collection, tx_json merged below. Anything else
+        # (a second meta, a non-object tx_json) is merged as a field so nothing is dropped.
+        nested = {meta_key, "tx_json" if tx_json is not None else None}
 
         doc: Dict[str, Any] = {
             "block_number": block_number,
@@ -109,12 +193,11 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             doc["transaction_index"] = to_int(meta["TransactionIndex"])
 
         for k, v in tx.items():
-            if k in ("meta", "metaData", "tx_json"):
-                continue
-            doc.setdefault(FIELD_RENAMES.get(k, k), v)
+            if k not in nested:
+                merge_field(doc, k, v)
         if tx_json:
             for k, v in tx_json.items():
-                doc.setdefault(FIELD_RENAMES.get(k, k), v)
+                merge_field(doc, k, v)
 
         tx_hash = doc.get("hash")
         if not tx_hash:
@@ -137,8 +220,8 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             "block_number": block_number,
             "block_hash": block_hash,
             "transaction_hash": tx_hash,
-            "memos": memos if isinstance(memos, list) else [],
-            "meta": meta,
+            "memos": escape_keys(memos) if isinstance(memos, list) else [],
+            "meta": escape_keys(meta),  # stored whole
             "close_time_iso": iso,
             "_inserted_at": now,
         })
@@ -171,6 +254,9 @@ def parse_ledger_result(index: int, result: Dict[str, Any], now: Optional[dateti
         raise MalformedLedger(f"ledger {index}: 'transactions' is not a list")
 
     ledger_doc = build_ledger_doc(index, ledger, len(txs), now)
+    for k, v in result.items():  # result level: validated, ledger_hash, ledger_index, ...
+        if k != "ledger":
+            merge_field(ledger_doc, k, v, LEDGER_RENAMES)
     tx_docs, meta_docs = flatten_transactions(
         index, ledger_doc["block_hash"], ledger_doc["close_time"], txs, now)
     return ledger_doc, tx_docs, meta_docs
