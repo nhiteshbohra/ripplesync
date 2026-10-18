@@ -43,7 +43,7 @@ Read the [Requirements](#requirements) first. Full history is very large (about 
 
 Every field the node sends is stored. Nothing is dropped. See [Data model](#data-model-nothing-is-dropped).
 
-Why a new program? The old scripts (folder `ripple blockchain pastcode/`, kept only for reference) used **public** XRPL servers.
+Why a new program? The old scripts (kept locally and in git history, not in this repo) used **public** XRPL servers.
 Public servers limit how many requests one client may send (rate limits). The old scripts lost data because of these limits.
 The problem was the public servers, not websockets. This program still uses websockets, but it talks to your own node as an **admin** client.
 xrpld does not rate-limit admin clients ([xrpl.org: Rate Limiting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting)).

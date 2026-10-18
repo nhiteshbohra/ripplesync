@@ -43,3 +43,6 @@ CLAUDE.md
 ai-context-discipline-prompt.md
 # Claude Code local state (agent worktrees)
 .claude/
+LEGACY_REVIEW.md
+# Legacy scripts: kept on disk, not pushed (history has them: commit 03df819)
+ripple blockchain pastcode/
