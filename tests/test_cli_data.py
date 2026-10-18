@@ -73,7 +73,7 @@ def test_verify_repair_still_failing_exits_1(cli_main, node, store, capsys):
     node.script[3] = [RpcError("lgrNotFound")]
     assert cli_main(["verify", "--start", "1", "--end", "3", "--repair"]) == 1
     out = capsys.readouterr().out
-    assert "ledger 3: repair failed" in out and "1 problem ledger(s) remain" in out
+    assert "ledger 3: repair failed" in out and "1 problem(s) remain" in out
 
 
 def test_verify_repair_node_unreachable_exits_4(cli_main, dead_node, store, capsys):
@@ -97,3 +97,47 @@ def test_plain_verify_unchanged_needs_no_node(cli_main, dead_node, store, capsys
     save(store, 1, 2, 3)
     assert cli_main(["verify", "--start", "1", "--end", "3"]) == 0
     assert capsys.readouterr().out.strip() == "OK"
+
+
+# -- verify --deep --------------------------------------------------------------------------
+
+def test_verify_deep_clean_exits_0(cli_main, node, store, capsys):
+    save(store, 1, 2, 3)
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 0
+    out = capsys.readouterr().out
+    assert "chain breaks 0, hash mismatches 0" in out and out.rstrip().endswith("OK")
+
+
+def test_verify_deep_hash_mismatch_exits_1(cli_main, node, store, capsys):
+    save(store, 1, 2, 3)
+    store.txs.update_one({"hash": "H2_0"}, {"$set": {"hash": "BOGUS"}})
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 1
+    assert "ledger 2: tx hashes differ from node" in capsys.readouterr().out
+    assert node.calls == []  # no repair without --repair
+
+
+def test_verify_deep_without_node_runs_offline_checks(cli_main, dead_node, store, capsys):
+    save(store, 1, 2, 3)
+    store.ledgers.update_one({"block_number": 3}, {"$set": {"parent_hash": "WRONG"}})
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 1  # problem found
+    out = capsys.readouterr().out
+    assert "node: error: ConnectFailed" in out and "ledger 3: parent_hash WRONG" in out
+
+
+def test_verify_deep_without_node_and_offline_ok_exits_4(cli_main, dead_node, store, capsys):
+    save(store, 1, 2, 3)
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 4
+    assert "offline checks OK; node comparison not done" in capsys.readouterr().out
+
+
+def test_verify_deep_repair_fixes_hash_mismatch(cli_main, node, store, capsys):
+    save(store, 1, 2, 3)
+    store.txs.delete_one({"hash": "H2_1"})
+    store.ledgers.update_one({"block_number": 2}, {"$set": {"num_transactions": 1}})
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep", "--repair"]) == 0
+    assert node.calls == [2] and store.tx_hashes(2) == {"H2_0", "H2_1"}
+
+
+def test_verify_deep_repair_without_node_exits_4(cli_main, dead_node, store):
+    save(store, 1, 2, 3)
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep", "--repair"]) == 4

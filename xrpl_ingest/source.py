@@ -246,3 +246,9 @@ class WsSource:
         if not isinstance(seq, int) or seq <= 0:
             raise TransientError("node has no validated ledger yet")
         return seq
+
+    # -- data-command helpers (verify --deep, tx) ------------------------------------------
+
+    async def get_ledger_hashes(self, index: int) -> Dict[str, Any]:
+        """`ledger` with the transaction hash list only (expand=false)."""
+        return await self.request("ledger", ledger_index=index, transactions=True, expand=False)

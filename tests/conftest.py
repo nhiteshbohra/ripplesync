@@ -96,6 +96,21 @@ class FakeSource:
     async def close(self):
         pass
 
+    # -- data commands (verify --deep, tx); scripts are optional attributes ------------------
+
+    async def get_ledger_hashes(self, index):
+        """expand=false result. Default: hashes of make_result(index). `hash_script[index]`:
+        list of outcomes (a hash list, a result dict, or an Exception to raise)."""
+        queue = getattr(self, "hash_script", {}).get(index)
+        outcome = queue.pop(0) if queue else [
+            t["hash"] for t in make_result(index)["ledger"]["transactions"]]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, dict):
+            return outcome
+        return {"ledger": {"ledger_index": index, "transactions": list(outcome)},
+                "ledger_index": index, "validated": True}
+
 
 class FakeWs:
     """Fake websocket. `handler(request_dict)` returns a response dict, None (never answer),

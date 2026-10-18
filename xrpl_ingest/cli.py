@@ -160,38 +160,63 @@ async def _status(cfg: Config, store: MongoStore, stop=lambda: False) -> int:
 
 def add_data_parsers(sub, verify: argparse.ArgumentParser) -> None:
     verify.add_argument("--repair", action="store_true",
-                        help="re-ingest the missing / tx-count-mismatch ledgers found "
-                             "(exit 0 if all OK afterwards, 1 if some remain, 4 node unreachable)")
+                        help="re-ingest the missing / tx-count-mismatch (with --deep also "
+                             "tx-hash-mismatch) ledgers found; exit 0 if all OK afterwards, "
+                             "1 if problems remain, 4 node unreachable")
+    verify.add_argument("--deep", action="store_true",
+                        help="also check parent_hash links (offline) and compare stored tx "
+                             "hashes with the node's ledger hash lists")
 
 
 def _verify_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
-    if not args.repair:
+    if not (args.repair or args.deep):
         return _verify(store, args.start, args.end)
     if args.start > args.end:
         print(f"verify: --start ({args.start}) must be <= --end ({args.end})", file=sys.stderr)
         return 2
-    return asyncio.run(_verify_repair(cfg, store, args.start, args.end, stop))
+    return asyncio.run(_verify_with_node(cfg, store, args.start, args.end, stop,
+                                         repair=args.repair, deep=args.deep))
 
 
-async def _verify_repair(cfg: Config, store: MongoStore, start: int, end: int, stop) -> int:
+async def _verify_with_node(cfg: Config, store: MongoStore, start: int, end: int, stop, *,
+                            repair: bool, deep: bool) -> int:
+    """1 if problems remain (or stopped early), else 4 if the node part could not run, else 0.
+    Without --repair an unreachable node still lets the offline checks run."""
     from .repair import repair_range
     source = WsSource.from_config(cfg, stop_check=stop)
+    node_error: Optional[IngestError] = None
     try:
-        node_ranges, _ = await discover_node(source)  # unreachable => IngestError => exit 4
-        s = await repair_range(source, store, start, end, node_ranges, retry=retry_policy(cfg),
-                               concurrency=cfg.concurrency, stop_check=stop, emit=print,
-                               window=VERIFY_WINDOW)
+        try:
+            node_ranges: Optional[list] = (await discover_node(source))[0]
+        except IngestError as e:
+            if repair or isinstance(e, NetworkMismatch):
+                raise  # main(): exit 4 (unreachable) or 2 (wrong network)
+            node_error, node_ranges = e, None
+            print(f"node: error: {_describe(e)}; running the offline checks only")
+        s = await repair_range(source if node_ranges is not None else None, store, start, end,
+                               node_ranges, retry=retry_policy(cfg), concurrency=cfg.concurrency,
+                               stop_check=stop, emit=print, window=VERIFY_WINDOW,
+                               repair=repair, deep=deep)
     finally:
         await source.close()
-    print(f"repair: found {s.found}, repaired {s.repaired}, failed {s.failed}, "
-          f"node lacks {s.node_lacks}, remaining {s.remaining}")
+    line = f"verify: bad ledgers {s.found}"
+    if deep:
+        line += (f", chain breaks {s.chain_breaks}, hash mismatches {s.hash_mismatches}, "
+                 f"not compared {s.unchecked}")
+    if repair:
+        line += (f"; repaired {s.repaired}, failed {s.failed}, node lacks {s.node_lacks}")
+    print(line + f"; remaining {s.remaining}")
     if s.stopped:
         print("stopped early: the rest of the range was not verified")
     elif s.remaining:
-        print(f"{s.remaining} problem ledger(s) remain")
+        print(f"{s.remaining} problem(s) remain")
+    elif node_error is not None:
+        print("offline checks OK; node comparison not done")
     else:
         print("OK")
-    return 0 if s.ok else 1
+    if not s.ok:
+        return 1
+    return error_exit_code(node_error) if node_error is not None else 0
 
 
 DATA_COMMANDS = {"verify": _verify_cmd}

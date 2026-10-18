@@ -166,6 +166,24 @@ class MongoStore:
                 out.append((d["block_number"], expected, got))
         return sorted(out)
 
+    def ledger_numbers(self, start: int, end: int) -> List[int]:
+        """Stored block_numbers in [start, end], ascending (keep the range window-sized)."""
+        cur = self.ledgers.find({"block_number": {"$gte": start, "$lte": end}},
+                                {"block_number": 1, "_id": 0}).sort("block_number", ASCENDING)
+        return [d["block_number"] for d in cur]
+
+    def ledger_links(self, start: int, end: int) -> List[Tuple[int, str, str]]:
+        """(block_number, block_hash, parent_hash) of stored ledgers in [start, end], ascending."""
+        cur = self.ledgers.find({"block_number": {"$gte": start, "$lte": end}},
+                                {"block_number": 1, "block_hash": 1, "parent_hash": 1, "_id": 0}
+                                ).sort("block_number", ASCENDING)
+        return [(d["block_number"], d.get("block_hash"), d.get("parent_hash")) for d in cur]
+
+    def tx_hashes(self, block_number: int) -> Set[str]:
+        """Hashes of the stored transactions of one ledger."""
+        return {d["hash"] for d in self.txs.find({"block_number": block_number},
+                                                 {"hash": 1, "_id": 0}) if "hash" in d}
+
     def stats(self) -> Dict[str, Any]:
         return {
             "ledgers": self.ledgers.estimated_document_count(),

@@ -127,6 +127,14 @@ def test_tx_count_mismatch_detected(store):
     assert store.tx_count_mismatches(1, 2) == [(1, 3, 0), (2, 2, 1)]
 
 
+def test_deep_verify_queries(store):
+    for i in (3, 1, 2, 5):
+        store.save_ledger_bundle(*bundle(i))
+    assert store.ledger_numbers(1, 4) == [1, 2, 3] and store.ledger_numbers(6, 9) == []
+    assert store.ledger_links(2, 5) == [(2, "LH2", "LH1"), (3, "LH3", "LH2"), (5, "LH5", "LH4")]
+    assert store.tx_hashes(2) == {"H2_0", "H2_1"} and store.tx_hashes(4) == set()
+
+
 def test_stats(store):
     store.save_ledger_bundle(*bundle(1))
     s = store.stats()

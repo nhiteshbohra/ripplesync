@@ -3,9 +3,11 @@ import asyncio
 import pytest
 
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
-from xrpl_ingest.errors import RpcError
-from xrpl_ingest.repair import (RepairSummary, describe_problems, ledgers_to_repair, on_node,
-                                repair_range, windows)
+from xrpl_ingest.errors import MalformedLedger, NotValidated, RequestTimeout, RpcError
+from xrpl_ingest.repair import (ChainBreak, HashDiff, RepairSummary, describe_diff,
+                                describe_problems, diff_hashes, find_chain_breaks,
+                                ledgers_to_repair, node_tx_hashes, on_node, repair_range,
+                                windows)
 from xrpl_ingest.transform import parse_ledger_result
 
 
@@ -100,8 +102,8 @@ def test_stop_requested_ends_repair_early(store):
     src = FakeSource()
     s, lines = repair(src, store, 1, 30, stop=lambda: True, window=10)
     assert src.calls == [] and s.stopped and not s.ok and s.attempted == 0
-    assert "stop requested; repair ended early" in lines
-    assert s.found == 10  # only the first window was looked at
+    assert "stop requested; ended early" in lines
+    assert s.found == 0  # stopped before the first window
 
 
 def test_stop_midway_keeps_what_was_done(store):
@@ -109,7 +111,7 @@ def test_stop_midway_keeps_what_was_done(store):
 
     def stop():
         calls["n"] += 1
-        return calls["n"] > 3
+        return calls["n"] > 4  # 1 check before the window, then one per ledger
 
     src = FakeSource()
     s, _ = repair(src, store, 1, 10, stop=stop, concurrency=1)
@@ -127,3 +129,142 @@ def test_works_window_by_window(store, monkeypatch):
     assert sorted(src.calls) == [4, 10] and s.ok
     # each window verified, and re-verified after a repair (window 5-8 had nothing to repair)
     assert asked == [(1, 4), (1, 4), (5, 8), (9, 10), (9, 10)]
+
+
+# -- verify --deep ---------------------------------------------------------------------------
+
+def deep(source, store, start, end, repair=False, node_ranges=((1, 100),), stop=lambda: False,
+         window=10_000, concurrency=3):
+    lines = []
+    ranges = None if node_ranges is None else list(node_ranges)
+    s = asyncio.run(repair_range(source, store, start, end, ranges, retry=FAST_RETRY,
+                                 concurrency=concurrency, stop_check=stop, emit=lines.append,
+                                 window=window, repair=repair, deep=True, sleep=no_sleep))
+    return s, lines
+
+
+def test_find_chain_breaks():
+    links = [(1, "A", "Z"), (2, "B", "A"), (3, "C", "X"), (5, "E", "D"), (6, "F", "E")]
+    assert find_chain_breaks(links, 1) == [ChainBreak(3, "X", "B")]  # 1: no N-1; 5: 4 absent
+    assert find_chain_breaks(links, 4) == []  # only N >= start is judged
+    assert find_chain_breaks([], 1) == []
+
+
+def test_diff_hashes():
+    assert diff_hashes(1, ["a", "b"], ["b", "a"]) is None
+    assert diff_hashes(1, ["a", "x", "y"], ["a", "c", "b"]) == HashDiff(1, ("b", "c"), ("x", "y"))
+
+
+def test_node_tx_hashes_validation():
+    good = {"ledger": {"ledger_index": 5, "transactions": ["h1", "h2"]}, "validated": True}
+    assert node_tx_hashes(5, good) == ["h1", "h2"]
+    assert node_tx_hashes(5, {"ledger": {"ledger_index": "5"}, "validated": True}) == []
+    with pytest.raises(NotValidated):
+        node_tx_hashes(5, {**good, "validated": False})
+    with pytest.raises(MalformedLedger, match="asked for ledger 6"):
+        node_tx_hashes(6, good)
+    with pytest.raises(MalformedLedger, match="list of hashes"):
+        node_tx_hashes(5, {"ledger": {"ledger_index": 5, "transactions": [{"hash": "h"}]},
+                           "validated": True})
+    with pytest.raises(MalformedLedger):
+        node_tx_hashes(5, {"validated": True})
+
+
+def test_describe_diff_truncates_long_lists():
+    d = HashDiff(9, tuple(f"m{i}" for i in range(7)), ("x",))
+    text = describe_diff(d, limit=2)
+    assert text == "ledger 9: tx hashes differ from node; 7 missing: m0, m1 (+5 more); 1 extra: x"
+
+
+def test_deep_clean_range_is_ok(store):
+    save(store, *range(1, 6))
+    s, lines = deep(FakeSource(), store, 1, 5)
+    assert s.ok and lines == [] and s.node_checked
+
+
+def test_deep_finds_chain_break_offline_without_node(store):
+    save(store, *range(1, 6))
+    store.ledgers.update_one({"block_number": 3}, {"$set": {"parent_hash": "WRONG"}})
+    s, lines = deep(None, store, 1, 5, node_ranges=None)
+    assert s.chain_breaks == 1 and s.remaining == 1 and not s.ok and not s.node_checked
+    assert lines == ["ledger 3: parent_hash WRONG != block_hash LH2 of ledger 2"]
+
+
+def test_deep_chain_check_crosses_window_boundaries(store):
+    save(store, *range(1, 7))
+    store.ledgers.update_one({"block_number": 3}, {"$set": {"parent_hash": "WRONG"}})
+    s, lines = deep(None, store, 1, 6, node_ranges=None, window=2)  # windows 1-2, 3-4, 5-6
+    assert s.chain_breaks == 1 and len(lines) == 1
+
+
+def test_deep_finds_tx_hash_mismatch(store):
+    save(store, *range(1, 4))
+    store.txs.update_one({"hash": "H2_0"}, {"$set": {"hash": "BOGUS"}})  # count still fine
+    s, lines = deep(FakeSource(), store, 1, 3)
+    assert (s.hash_mismatches, s.found, s.remaining) == (1, 1, 1) and not s.ok
+    assert lines == ["ledger 2: tx hashes differ from node; 1 missing: H2_0; 1 extra: BOGUS"]
+
+
+def test_deep_repair_reingests_hash_mismatch_ledger(store):
+    save(store, *range(1, 4))
+    store.txs.delete_one({"hash": "H2_1"})
+    store.ledgers.update_one({"block_number": 2}, {"$set": {"num_transactions": 1}})  # hide it
+    src = FakeSource()
+    s, lines = deep(src, store, 1, 3, repair=True)
+    assert src.calls == [2] and s.repaired == 1 and s.remaining == 0 and s.ok
+    assert store.tx_hashes(2) == {"H2_0", "H2_1"}
+
+
+def test_plain_repair_does_not_see_hash_mismatches(store):
+    save(store, *range(1, 4))
+    store.txs.delete_one({"hash": "H2_1"})
+    store.ledgers.update_one({"block_number": 2}, {"$set": {"num_transactions": 1}})
+    src = FakeSource()
+    s, _ = repair(src, store, 1, 3)
+    assert src.calls == [] and s.ok  # only --deep compares hashes
+
+
+def test_deep_repair_never_deletes_extra_tx_docs(store):
+    save(store, *range(1, 4))
+    store.txs.update_one({"hash": "H2_0"}, {"$set": {"hash": "BOGUS"}})
+    s, lines = deep(FakeSource(), store, 1, 3, repair=True)
+    assert s.repaired == 1 and s.remaining == 1 and not s.ok  # the extra one is only reported
+    assert "BOGUS" in store.tx_hashes(2)
+    assert lines[-1].endswith("1 extra: BOGUS (after repair)")
+
+
+def test_deep_node_error_counts_as_not_compared(store):
+    save(store, *range(1, 4))
+    src = FakeSource()
+    src.hash_script = {2: [RpcError("lgrNotFound")]}
+    s, lines = deep(src, store, 1, 3)
+    assert s.unchecked == 1 and s.remaining == 1 and not s.ok
+    assert "ledger 2: could not compare with node: RpcError: lgrNotFound" in lines
+
+
+def test_deep_transient_node_error_is_retried(store):
+    save(store, *range(1, 4))
+    src = FakeSource()
+    src.hash_script = {2: [RequestTimeout("slow"), ["H2_0", "H2_1"]]}
+    s, _ = deep(src, store, 1, 3)
+    assert s.ok and s.unchecked == 0
+
+
+def test_deep_skips_comparison_for_ledgers_the_node_lacks(store):
+    save(store, *range(1, 4))
+    src = FakeSource()
+    src.hash_script = {3: [RpcError("lgrNotFound")]}  # would fail if asked
+    s, _ = deep(src, store, 1, 3, node_ranges=[(1, 2)])
+    assert s.ok
+
+
+def test_deep_stop_during_comparison(store):
+    save(store, *range(1, 11))
+    calls = {"n": 0}
+
+    def stop():
+        calls["n"] += 1
+        return calls["n"] > 3
+
+    s, lines = deep(FakeSource(), store, 1, 10, stop=stop, concurrency=1)
+    assert s.stopped and not s.ok and "stop requested; ended early" in lines
