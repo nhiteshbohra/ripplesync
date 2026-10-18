@@ -1,7 +1,7 @@
 """Graceful stop: the stop file (process_status.txt) and signals.
 
-Stop file: the first line whose key matters to this command decides; keys are
-case-insensitive. `current_process=0` stops every command, `tail=0`, `backfill=0` and
+Stop file: any line whose key matters to this command and whose value is 0 stops it; keys
+are case-insensitive. `current_process=0` stops every command, `tail=0`, `backfill=0` and
 `retry-failed=0` stop only that command; any other value (e.g. `=1`) means keep running.
 Blank lines, `#` comments and other keys are skipped. A missing or unreadable file means
 keep running (legacy behaviour).
@@ -91,15 +91,17 @@ def _keys(command: Optional[str]) -> set:
 
 
 def says_stop(lines: Iterable[str], command: Optional[str] = None) -> bool:
-    """First line with a key that applies (current_process, or `command`) decides."""
+    """True if any line with a key that applies (current_process, or `command`) is `=0`.
+
+    Any-zero-wins, so a leftover `current_process=1` line cannot hide a `tail=0` below it."""
     keys = _keys(command)
     for raw in lines:
         line = raw.split(" #", 1)[0].split("\t#", 1)[0].strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        if key.strip().lower() in keys:
-            return value.strip() == "0"
+        if key.strip().lower() in keys and value.strip() == "0":
+            return True
     return False
 
 

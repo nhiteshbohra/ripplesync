@@ -58,8 +58,8 @@ exit codes:
 
 STOP_HELP = """\
 graceful stop: a line `current_process=0` (all commands) or `<command>=0` (tail, backfill,
-retry-failed) in the stop file (PROCESS_STATUS_FILE); the first line whose key applies
-wins. Or SIGTERM, SIGBREAK (Windows Ctrl+Break), or the first Ctrl+C (second = abort)."""
+retry-failed) in the stop file (PROCESS_STATUS_FILE); any line that applies and says 0
+stops. Or SIGTERM, SIGBREAK (Windows Ctrl+Break), or the first Ctrl+C (second = abort)."""
 
 
 def build_parser() -> argparse.ArgumentParser:

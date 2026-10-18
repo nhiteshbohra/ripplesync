@@ -84,7 +84,7 @@ def test_binary_garbage_means_run(tmp_path):
     assert stop_requested(str(f)) is False
 
 
-# -- per-command keys, first matching line wins, case-insensitive -------------------------
+# -- per-command keys, any matching `=0` line stops, case-insensitive -------------------------
 
 @pytest.mark.parametrize("content,command,stop", [
     ("CURRENT_PROCESS=0", None, True),  # legacy uppercase
@@ -96,9 +96,10 @@ def test_binary_garbage_means_run(tmp_path):
     ("backfill=0", "backfill", True),
     ("retry-failed=0", "retry-failed", True),
     ("retry-failed=0", "tail", False),
-    ("current_process=1\ntail=0", "tail", False),  # first matching line wins
+    ("current_process=1\ntail=0", "tail", True),  # any matching =0 wins (leftover =1 line)
     ("tail=0\ncurrent_process=1", "tail", True),
-    ("tail=1\ncurrent_process=0", "tail", False),
+    ("tail=1\ncurrent_process=0", "tail", True),
+    ("current_process=1\ntail=1", "tail", False),
     ("backfill=0\ncurrent_process=0", "tail", True),  # backfill line does not match tail
     ("# tail=0\n\nhello\ntail=0", "tail", True),  # comments, blanks, junk skipped
     ("tail=0  # paused for maintenance", "tail", True),
@@ -113,7 +114,7 @@ def test_stop_file_keys(tmp_path, content, command, stop):
 def test_command_key_in_utf16_file(tmp_path):
     f = tmp_path / "s.txt"
     f.write_bytes("﻿current_process=1\r\nbackfill=0\r\n".encode("utf-16-le"))
-    assert stop_requested(str(f), "backfill") is False  # current_process=1 matched first
+    assert stop_requested(str(f), "backfill") is True  # current_process=1 cannot hide backfill=0
     f.write_bytes("﻿backfill=0\r\ncurrent_process=1\r\n".encode("utf-16-le"))
     assert stop_requested(str(f), "backfill") is True
 
