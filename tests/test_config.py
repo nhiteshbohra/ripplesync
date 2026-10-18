@@ -72,11 +72,12 @@ def test_bad_log_level():
         Config.from_env({**BASE, "LOG_LEVEL": "loud"})
 
 
-def test_setup_logging_uses_shared_format_and_level(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(logging, "basicConfig", lambda **kw: seen.update(kw))
+def test_setup_logging_uses_shared_format_and_level(restore_logging):
     setup_logging("WARNING")
-    assert seen["level"] == logging.WARNING and seen["format"] == LOG_FORMAT
+    root = logging.getLogger()
+    assert root.level == logging.WARNING
+    ours = [h for h in root.handlers if getattr(h, "_xrpl_ingest_handler", False)]
+    assert len(ours) == 1 and ours[0].formatter._fmt == LOG_FORMAT
     assert "%(levelname)s %(name)s" in LOG_FORMAT
 
 
@@ -117,3 +118,119 @@ def test_redact_url_in_urls_and_messages(text, shown):
 def test_network_check_can_be_disabled():
     assert Config.from_env({**BASE, "EXPECTED_NETWORK_ID": "none"}).expected_network_id is None
     assert Config.from_env({**BASE, "EXPECTED_NETWORK_ID": "1"}).expected_network_id == 1
+
+
+# -- base dir, new variables, MONGO_URI_FILE, Windows process cap, Mongo client options ---
+
+def test_new_defaults_and_paths_resolve_against_base(tmp_path):
+    c = Config.from_env(BASE, base_dir=str(tmp_path))
+    assert c.base_dir == str(tmp_path)
+    assert c.process_status_file == str(tmp_path / "process_status.txt")
+    assert c.backfill_range_file == str(tmp_path / "backfill_range.txt")
+    assert c.log_file == "" and (c.log_max_mb, c.log_backups) == (100, 10)
+    assert (c.mongo_server_selection_timeout_ms, c.mongo_socket_timeout_ms) == (10000, 120000)
+    assert c.min_free_gb == 0
+
+
+def test_absolute_paths_kept(tmp_path):
+    other = tmp_path / "elsewhere" / "ps.txt"
+    c = Config.from_env({**BASE, "PROCESS_STATUS_FILE": str(other), "LOG_FILE": "logs/a.log"},
+                        base_dir=str(tmp_path / "base"))
+    assert c.process_status_file == str(other)
+    assert c.log_file == str(tmp_path / "base" / "logs" / "a.log")
+
+
+@pytest.mark.parametrize("name,val", [("LOG_MAX_MB", "0"), ("LOG_BACKUPS", "-1"),
+                                      ("MONGO_SERVER_SELECTION_TIMEOUT_MS", "0"),
+                                      ("MONGO_SOCKET_TIMEOUT_MS", "x"), ("MIN_FREE_GB", "-1"),
+                                      ("MIN_FREE_GB", "nan")])
+def test_new_numbers_validated(name, val):
+    with pytest.raises(ConfigError, match=name):
+        Config.from_env({**BASE, name: val})
+
+
+def test_new_numbers_accepted():
+    c = Config.from_env({**BASE, "LOG_BACKUPS": "0", "MONGO_SOCKET_TIMEOUT_MS": "0",
+                         "MIN_FREE_GB": "2.5"})
+    assert c.log_backups == 0 and c.mongo_socket_timeout_ms == 0 and c.min_free_gb == 2.5
+
+
+def test_num_processes_capped_on_windows_only():
+    env = {**BASE, "NUM_PROCESSES": "62"}
+    with pytest.raises(ConfigError, match="NUM_PROCESSES=62 must be <= 61 on Windows"):
+        Config.from_env(env, platform="win32")
+    assert Config.from_env(env, platform="linux").num_processes == 62
+    assert Config.from_env({**BASE, "NUM_PROCESSES": "61"}, platform="win32").num_processes == 61
+
+
+def test_mongo_uri_file(tmp_path):
+    (tmp_path / "secret").write_bytes(b"\xef\xbb\xbfmongodb://u:p@h:1/db\r\n\r\n")
+    c = Config.from_env({"MONGO_URI_FILE": "secret"}, base_dir=str(tmp_path))
+    assert c.mongo_uri == "mongodb://u:p@h:1/db" and c.mongo_uri_file == str(tmp_path / "secret")
+    assert "u:p" not in repr(c)
+
+
+@pytest.mark.parametrize("content,msg", [(None, "cannot read"), (b"", "exactly one"),
+                                         (b"mongodb://a\nmongodb://b\n", "exactly one"),
+                                         (b"http://x\n", "must start with mongodb://")])
+def test_mongo_uri_file_errors(tmp_path, content, msg):
+    if content is not None:
+        (tmp_path / "secret").write_bytes(content)
+    with pytest.raises(ConfigError, match=msg):
+        Config.from_env({"MONGO_URI_FILE": "secret"}, base_dir=str(tmp_path))
+
+
+def test_mongo_uri_and_file_both_set_is_error(tmp_path):
+    (tmp_path / "secret").write_text("mongodb://h")
+    with pytest.raises(ConfigError, match="only one of MONGO_URI and MONGO_URI_FILE"):
+        Config.from_env({**BASE, "MONGO_URI_FILE": "secret"}, base_dir=str(tmp_path))
+
+
+def test_env_vars_registry_covers_everything_from_env_reads():
+    from xrpl_ingest.config import ENV_VARS
+
+    class Recording(dict):
+        def get(self, k, default=None):
+            seen.add(k)
+            return super().get(k, default)
+    seen = set()
+    Config.from_env(Recording(BASE))
+    assert seen == {n for n, _ in ENV_VARS}
+    import dataclasses
+    names = {f.name for f in dataclasses.fields(Config)}
+    assert all(f in names for _, f in ENV_VARS)
+
+
+def test_mongo_client_kwargs_defaults_uri_wins_overrides_win():
+    from xrpl_ingest import __version__
+    from xrpl_ingest.config import mongo_client_kwargs
+    c = Config(mongo_uri="mongodb://h")
+    assert mongo_client_kwargs(c) == {"serverSelectionTimeoutMS": 10000, "socketTimeoutMS": 120000,
+                                      "appname": f"xrpl-ingest/{__version__}"}
+    c = Config(mongo_uri="mongodb://h/?serverSelectionTimeoutMS=5000&APPNAME=mine",
+               mongo_socket_timeout_ms=0)
+    assert mongo_client_kwargs(c) == {"socketTimeoutMS": None}
+    assert mongo_client_kwargs(c, socketTimeoutMS=5000)["socketTimeoutMS"] == 5000
+
+
+def test_store_from_config_passes_client_options(monkeypatch):
+    from xrpl_ingest import store as store_mod
+    seen = {}
+
+    class FakeClient(dict):
+        def __init__(self, uri, **kw):
+            seen.update(uri=uri, **kw)
+
+        def __getitem__(self, name):
+            return mongomock.MongoClient()[name]
+    import mongomock
+    monkeypatch.setattr(store_mod, "MongoClient", FakeClient)
+    store_mod.MongoStore.from_config(Config(mongo_uri="mongodb://h"), connectTimeoutMS=5000)
+    assert seen["serverSelectionTimeoutMS"] == 10000 and seen["connectTimeoutMS"] == 5000
+    assert seen["appname"].startswith("xrpl-ingest/")
+
+
+def test_redact_mongo_uri_hides_credentials_and_query():
+    from xrpl_ingest.config import redact_mongo_uri
+    assert redact_mongo_uri("mongodb://u:p@h:1/db?a=1&b=secret") == "mongodb://h:1/db?<2 option(s) hidden>"
+    assert redact_mongo_uri("mongodb://h") == "mongodb://h"

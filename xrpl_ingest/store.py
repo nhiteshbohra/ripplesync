@@ -31,8 +31,11 @@ class MongoStore:
         self.meta = db[cfg.metadata_collection]
 
     @classmethod
-    def from_config(cls, cfg: Config) -> "MongoStore":
-        return cls(MongoClient(cfg.mongo_uri), cfg)
+    def from_config(cls, cfg: Config, **client_options: Any) -> "MongoStore":
+        """Client with the configured timeouts and an appname (see config.mongo_client_kwargs);
+        `client_options` (e.g. doctor's short timeouts) win."""
+        from .config import mongo_client_kwargs
+        return cls(MongoClient(cfg.mongo_uri, **mongo_client_kwargs(cfg, **client_options)), cfg)
 
     def close(self) -> None:
         self.client.close()
@@ -195,3 +198,9 @@ class MongoStore:
             "checkpoint": self.get_checkpoint(),
             "chunks_done": self.meta.count_documents({"kind": CHUNK_KIND}),
         }
+
+    # -- runtime helpers ---------------------------------------------------------
+
+    def db_stats(self) -> Dict[str, Any]:
+        """dbStats of the configured database (fsTotalSize / fsUsedSize: disk guard)."""
+        return self.ledgers.database.command("dbStats")
