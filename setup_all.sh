@@ -2,19 +2,25 @@
 # ==============================================================================
 # Complete All-In-One Setup: MongoDB + Ripple Node (xrpld) + XRPL Ingest
 # ==============================================================================
-# This script sets up everything from scratch on Ubuntu (20.04 / 22.04 / 24.04 / WSL2):
+# NOT TESTED ON A REAL HOST: only `bash -n` and shellcheck so far.
+# Sets up everything from scratch on x86_64 Ubuntu/Debian with glibc >= 2.31 (xrpl.org:
+# Ubuntu 20.04+ / Debian 11+; MongoDB 8.0 apt repo: Ubuntu 20.04/22.04/24.04 only), or WSL2:
 #   1. System preflight checks
-#   2. Installs official MongoDB Community Edition 7.0/8.0 & starts service
-#   3. Installs official XRPLF Ripple Node (xrpld), configures /etc/xrpld/xrpld.cfg & starts service
-#   4. Sets up Python 3 virtual environment (.venv) and installs all dependencies
+#   2. Installs official MongoDB Community Edition 8.0 & starts service
+#      (skipped on WSL -- MongoDB does not support WSL; run it on Windows, instructions printed --
+#       and on releases without a MongoDB 8.0 apt repo)
+#   3. Installs official XRPLF xrpld (pinned key fingerprint), configures /etc/xrpld/xrpld.cfg & starts it
+#   4. Sets up the Python virtual environment (.venv; Python >= 3.10, 3.12 recommended)
 #   5. Configures .env with local Mongo & WebSocket admin connections
-#   6. Runs test suite to verify full setup health
-#   7. Installs systemd xrpl-tail.service for automatic live ledger ingestion
+#   6. Runs the test suite and `python -m xrpl_ingest doctor --mongo`
+#   7. Installs systemd units xrpl-tail.service + xrpl-backfill.service from deploy/systemd/
+#      (neither enabled; see the next steps printed at the end)
 #
 # Usage:
 #   bash setup_all.sh                               # Interactive or standard pruned defaults
 #   HISTORY_MODE=pruned bash setup_all.sh           # Pruned mode (expected: tens of GB disk; sync time not measured)
 #   HISTORY_MODE=full bash setup_all.sh             # Full history mode (~39 TB disk per xrpl.org; months to sync)
+# Env: DB_PATH, NODE_SIZE, FIXED_PEERS, MONGO_URI, PYTHON=python3.12, SKIP_MONGO=1, FORCE=1
 # ==============================================================================
 
 set -euo pipefail
@@ -57,23 +63,13 @@ if [ "$(id -u)" -ne 0 ]; then
   SUDO="sudo"
 fi
 
-is_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
-has_systemd() { [ -d /run/systemd/system ]; }
-
+# Shared helpers: platform/python checks, MongoDB + xrpld install (pinned XRPLF key),
+# systemd units from deploy/systemd/, doctor checks, next steps.
+# shellcheck source=setup/common.sh
+. "$REPO_DIR/setup/common.sh"
 # check_db_path / check_db_owner: DB_PATH gets `chown -R`, refuse system dirs and foreign data.
 # shellcheck source=setup/db_path_guard.sh
 . "$REPO_DIR/setup/db_path_guard.sh"
-
-# Point LINK at TARGET; an existing real file is moved aside first, never overwritten.
-link_cfg() {
-  local target="$1" link="$2" bak
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    bak="$link.bak.$(date +%s)"
-    $SUDO mv "$link" "$bak"
-    warn "$link was a regular file; moved it to $bak"
-  fi
-  $SUDO ln -sfn "$target" "$link"
-}
 
 clear 2>/dev/null || true
 cat << "BANNER"
@@ -102,11 +98,7 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 1/6] System Preflight Checks"
 
-. /etc/os-release
-echo "OS: $PRETTY_NAME | Arch: $(uname -m) | WSL: $(is_wsl && echo yes || echo no) | systemd: $(has_systemd && echo yes || echo no)"
-
-[ "${ID:-}" = ubuntu ] || warn "Distribution is not Ubuntu. (Ubuntu 22.04/24.04 x86_64 are recommended)"
-[ "$(uname -m)" = x86_64 ] || need_ok "Architecture $(uname -m) is not x86_64"
+check_platform   # glibc >= 2.31 on x86_64; sources /etc/os-release
 
 RAM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
 echo "System RAM: ${RAM_GB} GB (node_size=$NODE_SIZE)"
@@ -144,7 +136,7 @@ fi
 if is_wsl && ! has_systemd; then
   warn "WSL detected without systemd enabled."
   echo "To enable systemd in WSL, add this to /etc/wsl.conf:"
-  echo -e "[boot]\nsystemd=true"
+  printf '[boot]\nsystemd=true\n'
   echo "Then run 'wsl --shutdown' from Windows PowerShell and restart WSL."
 fi
 
@@ -154,46 +146,11 @@ echo ""
 # ------------------------------------------------------------------------------
 # Phase 2: Install MongoDB Community Edition
 # ------------------------------------------------------------------------------
-say "[Phase 2/6] Installing MongoDB Community Edition"
+say "[Phase 2/6] MongoDB Community Edition $MONGO_SERIES"
 
-CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"  # /etc/os-release (Phase 1); derivatives (Mint, Pop!_OS) set UBUNTU_CODENAME
-case "$CODENAME" in
-  focal|jammy|noble) ;;
-  *) die "No MongoDB apt repo configured for Ubuntu codename '${CODENAME:-unknown}' (supported here: focal, jammy, noble). Install MongoDB manually." ;;
-esac
+install_mongodb   # skips WSL (unsupported there), SKIP_MONGO=1, releases without a repo, other installed versions
 
-$SUDO apt-get update -y
-$SUDO apt-get install -y curl gnupg lsb-release ca-certificates
-
-MONGO_VER="7.0"
-if [ "$CODENAME" = "noble" ]; then
-  MONGO_VER="8.0"
-fi
-
-say "Adding MongoDB $MONGO_VER official APT repository for Ubuntu $CODENAME..."
-$SUDO install -m 0755 -d /etc/apt/keyrings
-curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGO_VER}.asc" | \
-  $SUDO gpg --dearmor --yes -o "/etc/apt/keyrings/mongodb-server-${MONGO_VER}.gpg" 2>/dev/null || \
-  curl -fsSL "https://pgp.mongodb.com/server-${MONGO_VER}.asc" | \
-  $SUDO gpg --dearmor --yes -o "/etc/apt/keyrings/mongodb-server-${MONGO_VER}.gpg"
-
-echo "deb [ arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb-server-${MONGO_VER}.gpg ] https://repo.mongodb.org/apt/ubuntu ${CODENAME}/mongodb-org/${MONGO_VER} multiverse" \
-  | $SUDO tee "/etc/apt/sources.list.d/mongodb-org-${MONGO_VER}.list" >/dev/null
-
-$SUDO apt-get update -y
-$SUDO apt-get install -y mongodb-org
-
-if has_systemd; then
-  say "Starting mongod service..."
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now mongod
-  sleep 2
-  $SUDO systemctl is-active --quiet mongod && ok "MongoDB service is active and running" || warn "MongoDB service started with warnings"
-else
-  warn "No systemd: start mongod manually with 'sudo mongod --config /etc/mongod.conf &'"
-fi
-
-ok "MongoDB setup complete"
+ok "MongoDB step complete"
 echo ""
 
 # ------------------------------------------------------------------------------
@@ -201,17 +158,10 @@ echo ""
 # ------------------------------------------------------------------------------
 say "[Phase 3/6] Installing Ripple Node (xrpld)"
 
-say "Adding official XRPLF repository..."
-$SUDO install -m 0755 -d /etc/apt/keyrings
-$SUDO wget -qO /etc/apt/keyrings/xrplf.asc https://packages.xrplf.org/xrplf.asc
-echo "deb [signed-by=/etc/apt/keyrings/xrplf.asc] https://packages.xrplf.org/repository/deb-stable any main" \
-  | $SUDO tee /etc/apt/sources.list.d/xrplf.list >/dev/null
-
-$SUDO apt-get update -y
-$SUDO apt-get install -y xrpld python3
+install_xrpld_pkg   # XRPLF apt repo; refuses a key whose fingerprint is not the pinned one
 
 # Stop service before modifying config
-has_systemd && $SUDO systemctl stop xrpld 2>/dev/null || true
+if has_systemd; then $SUDO systemctl stop xrpld 2>/dev/null || true; fi
 
 say "Configuring storage directory at $DB_PATH..."
 $SUDO mkdir -p "$DB_PATH"
@@ -222,8 +172,8 @@ else
   warn "User 'xrpld' not found yet; make sure permissions match the service user."
 fi
 
-say "Configuring /etc/xrpld/xrpld.cfg (Mode: $HISTORY_MODE, Size: $NODE_SIZE, WS Port: 6006)..."
-$SUDO mkdir -p /etc/xrpld /etc/opt/ripple
+say "Configuring $XRPLD_CFG (Mode: $HISTORY_MODE, Size: $NODE_SIZE, WS Port: 6006)..."
+$SUDO mkdir -p "$(dirname "$XRPLD_CFG")"
 PEER_ARGS=()
 if [ -n "$FIXED_PEERS" ]; then
   IFS=';' read -ra PARTS <<< "$FIXED_PEERS"
@@ -232,24 +182,15 @@ if [ -n "$FIXED_PEERS" ]; then
   done
 fi
 
-$SUDO python3 "$REPO_DIR/setup/edit_cfg.py" /etc/xrpld/xrpld.cfg \
+$SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$XRPLD_CFG" \
   --db-path "$DB_PATH" \
   --history "$HISTORY_MODE" \
   --node-size "$NODE_SIZE" \
   "${PEER_ARGS[@]}"
+remove_old_cfg_links
 
-link_cfg /etc/xrpld/xrpld.cfg /etc/opt/ripple/xrpld.cfg
-link_cfg /etc/xrpld/xrpld.cfg /etc/opt/ripple/rippled.cfg
-
-if has_systemd; then
-  say "Starting xrpld service..."
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now xrpld
-  sleep 3
-  $SUDO systemctl is-active --quiet xrpld && ok "Ripple node (xrpld) service is active and running" || warn "xrpld started with warnings"
-else
-  warn "No systemd: start xrpld manually with 'xrpld --conf /etc/xrpld/xrpld.cfg &'"
-fi
+start_xrpld
+firewall_note
 
 ok "Ripple node installed and configured"
 echo ""
@@ -260,22 +201,15 @@ echo ""
 say "[Phase 4/6] Setting Up Python Ingestion Environment"
 
 $SUDO apt-get install -y python3 python3-venv python3-pip
-
-if [ ! -d "$REPO_DIR/.venv" ]; then
-  say "Creating Python virtual environment at $REPO_DIR/.venv..."
-  python3 -m venv "$REPO_DIR/.venv"
-fi
-
-say "Installing dependencies from requirements.txt..."
-"$REPO_DIR/.venv/bin/pip" install -q --upgrade pip
-"$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt"
+pick_python   # >= 3.10 required, 3.12 recommended (PYTHON=... to choose)
+make_venv     # .venv + pip install -r requirements.txt
 
 # Configure .env
 if [ ! -f "$REPO_DIR/.env" ]; then
   say "Creating .env configuration..."
   cp "$REPO_DIR/.env.example" "$REPO_DIR/.env"
   chmod 600 "$REPO_DIR/.env"
-  ESC_URI=$(printf '%s' "$MONGO_URI" | sed -e 's/[\\&|]/\\&/g')
+  ESC_URI=$(sed_escape_repl "$MONGO_URI")
   sed -i "s|^MONGO_URI=.*|MONGO_URI=${ESC_URI}|" "$REPO_DIR/.env"
   ok ".env created (chmod 600)"
 else
@@ -292,63 +226,24 @@ echo ""
 say "[Phase 5/6] Verifying Tests & Connections"
 
 say "Running pytest suite..."
-(cd "$REPO_DIR" && .venv/bin/python -m pytest -q) && ok "All tests passed successfully" || die "Test suite failed; fix it before continuing"
+if (cd "$REPO_DIR" && .venv/bin/python -m pytest -q); then
+  ok "All tests passed successfully"
+else
+  die "Test suite failed; fix it before continuing"
+fi
 
-say "Verifying MongoDB connectivity..."
-(cd "$REPO_DIR" && .venv/bin/python - <<'PY'
-import os, sys
-from dotenv import load_dotenv
-from pymongo import MongoClient
-load_dotenv(os.path.join(os.getcwd(), ".env"))  # explicit path: find_dotenv() asserts when run from stdin
-uri = os.environ.get("MONGO_URI", "mongodb://127.0.0.1:27017")
-try:
-    MongoClient(uri, serverSelectionTimeoutMS=4000).admin.command("ping")
-    print("MongoDB connected successfully")
-except Exception as e:
-    print(f"MongoDB connection failed: {e}", file=sys.stderr)
-    sys.exit(1)
-PY
-) && ok "MongoDB ping verified" || warn "MongoDB ping check failed; verify mongod is running"
+say "Verifying MongoDB connectivity (python -m xrpl_ingest doctor --mongo)..."
+check_with_doctor "MongoDB" --mongo
 
 echo ""
 
 # ------------------------------------------------------------------------------
-# Phase 6: Service Registration (xrpl-tail.service)
+# Phase 6: Service Registration (xrpl-tail.service, xrpl-backfill.service)
 # ------------------------------------------------------------------------------
-say "[Phase 6/6] Registering Background Ingest Service"
+say "[Phase 6/6] Registering Background Ingest Services"
 
-TAIL_USER="${SUDO_USER:-$(id -un)}"
-if ! has_systemd; then
-  :
-elif [ "$TAIL_USER" = root ]; then
-  warn "Not installing xrpl-tail.service: it would run as root. Re-run as a normal user (with sudo) to install it."
-else
-  # ExecStart path is quoted because REPO_DIR may contain spaces (systemd.syntax "Quoting");
-  # WorkingDirectory= takes one path, spaces allowed unquoted. Neither verified on a real systemd yet.
-  # Restart=on-failure: tail exits 0 on the process_status.txt stop flag and must stay stopped.
-  # RestartPreventExitStatus=2: exit 2 = config/usage error (incl. wrong network); retrying won't help.
-  # TimeoutStopSec=120: SIGTERM is a graceful stop that may wait out one connect cycle.
-  $SUDO tee /etc/systemd/system/xrpl-tail.service >/dev/null <<UNIT
-[Unit]
-Description=XRPL ledger live tail into MongoDB
-Wants=network-online.target
-After=network-online.target xrpld.service mongod.service
-
-[Service]
-User=$TAIL_USER
-WorkingDirectory=$REPO_DIR
-ExecStart="$REPO_DIR/.venv/bin/python" -m xrpl_ingest tail
-Restart=on-failure
-RestartSec=10
-RestartPreventExitStatus=2
-TimeoutStopSec=120
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-  $SUDO systemctl daemon-reload
-  ok "Registered /etc/systemd/system/xrpl-tail.service (User=$TAIL_USER)"
-fi
+UNITS=0
+if install_ingest_units "${SUDO_USER:-$(id -un)}"; then UNITS=1; fi
 
 # ------------------------------------------------------------------------------
 # Summary & Next Steps
@@ -366,31 +261,11 @@ $RESULT
 ====================================================================
 
 Components (expected endpoints; not verified by this script):
-  1. MongoDB Community Edition : expected on 127.0.0.1:27017 (check: systemctl status mongod)
+  1. MongoDB Community Edition : expected on 127.0.0.1:27017 (check: python -m xrpl_ingest doctor --mongo)
   2. Ripple Node (xrpld)       : expected on ws://127.0.0.1:6006 (check: bash setup/check_node.sh)
   3. Python Environment        : $REPO_DIR/.venv
-
-Next Steps:
-
-  1. Watch your Ripple Node sync:
-       bash setup/check_node.sh
-       # Or view live logs:
-       sudo journalctl -u xrpld -f
-
-     (Expected states: disconnected -> connected -> syncing -> tracking -> full)
-     (Sync time is not measured yet; check progress with check_node.sh.)
-
-  2. Once the node reports complete_ledgers, test backfill:
-       source .venv/bin/activate
-       python -m xrpl_ingest status
-       python -m xrpl_ingest backfill --start <START_LEDGER> --end <END_LEDGER>
-       python -m xrpl_ingest verify   --start <START_LEDGER> --end <END_LEDGER>
-
-  3. Enable continuous live ledger tailing:
-       sudo systemctl enable --now xrpl-tail
-
-  4. Stop any backfill or tail gracefully:
-       echo current_process=0 > process_status.txt
-
-====================================================================
+  xrpld logs: sudo journalctl -u xrpld -f  (and /var/log/xrpld/debug.log)
+  Expected node states: disconnected -> connected -> syncing -> tracking -> full
 EOF
+print_next_steps "$UNITS"
+echo "===================================================================="

@@ -1,0 +1,48 @@
+# xrpl-backfill.service -- one historical backfill run (multi-process) into MongoDB.
+# TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
+#
+# Installed (NOT enabled) by setup/setup_ubuntu.sh (ingest) and setup_all.sh, which replace
+# @REPO_DIR@ and @USER@ and write /etc/systemd/system/xrpl-backfill.service.
+# The range comes from @REPO_DIR@/backfill_range.txt (see backfill_range.txt.example);
+# without that file the whole history (32570 .. latest) is backfilled.
+#   sudo systemctl start xrpl-backfill        # run it (in the background)
+#   journalctl -u xrpl-backfill -f            # follow progress
+#   python -m xrpl_ingest status              # chunk progress for the range file's range
+# Do NOT `systemctl enable` it unless you want a backfill pass at every boot.
+# The repo path must not contain % $ " \ or newlines (systemd specifier/quoting rules).
+#
+# Stop gracefully: `sudo systemctl stop xrpl-backfill` (SIGTERM), or a line `backfill=0`
+# (or `current_process=0`) in @REPO_DIR@/process_status.txt. Finished chunks are kept;
+# the next start resumes with the unfinished ones.
+#
+# Exit codes: 0 done · 1 ledgers failed / stopped early · 2 config/args · 3 node lacks part
+# of the range · 4 node/Mongo unreachable · 5 another backfill holds the lock · 6 internal
+# error. Only 4 and 6 (and crashes by signal) are restarted. 1 is NOT restarted here
+# (unlike xrpl-tail): a finished run with recorded failed ledgers also exits 1, and
+# restarting it would loop; run `python -m xrpl_ingest retry-failed` for those instead.
+
+[Unit]
+Description=XRPL ingest: historical backfill into MongoDB
+Wants=network-online.target
+After=network-online.target mongod.service xrpld.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest backfill
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=1 2 3 5
+KillSignal=SIGTERM
+TimeoutStopSec=300
+# mixed (not control-group): SIGTERM goes to the main process only, which stops its pool
+# workers through the shared stop event and lets in-flight chunks finish; anything still
+# running after TimeoutStopSec gets SIGKILL. With control-group every worker would get
+# SIGTERM at the same moment and could die mid-chunk (data stays consistent -- unfinished
+# chunks are redone -- but the stop is not graceful).
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

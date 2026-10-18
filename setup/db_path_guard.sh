@@ -12,9 +12,10 @@ db_path_problem() {
       echo "$p is a system directory"; return ;;
     /etc/*|/usr/*|/proc/*|/sys/*|/dev/*|/boot/*)
       echo "$p is inside a system directory"; return ;;
-    /home/*/*) ;;
-    /home/*)
-      echo "$p is a home directory"; return ;;
+    # The packaged xrpld.service sets ProtectHome=true: /home, /root and /run/user are
+    # invisible to xrpld, so a DB there would fail at start (per the xrpld 3.4.1 unit file).
+    /home/*|/root/*|/run/user|/run/user/*)
+      echo "$p is under /home, /root or /run/user, which xrpld.service hides (ProtectHome=true)"; return ;;
   esac
   case "$(dirname "$p")" in
     /|//) echo "$p is directly under /" ;;

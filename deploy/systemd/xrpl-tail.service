@@ -1,0 +1,44 @@
+# xrpl-tail.service -- live follow of new validated ledgers into MongoDB.
+# TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
+#
+# Installed by setup/setup_ubuntu.sh (ingest) and setup_all.sh, which replace
+# @REPO_DIR@ (absolute repo path) and @USER@ (the non-root user that owns the repo) and
+# write /etc/systemd/system/xrpl-tail.service. By hand:
+#   sed -e 's|@REPO_DIR@|/opt/xrpl-ingest|g' -e 's|@USER@|xrpl|g' \
+#       deploy/systemd/xrpl-tail.service | sudo tee /etc/systemd/system/xrpl-tail.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now xrpl-tail
+# The repo path must not contain % $ " \ or newlines (systemd specifier/quoting rules).
+#
+# Stop gracefully: `sudo systemctl stop xrpl-tail` (SIGTERM), or a line `tail=0`
+# (or `current_process=0`) in @REPO_DIR@/process_status.txt -- tail then exits 0 and,
+# because of Restart=on-failure, stays stopped until started again.
+# Logs: journalctl -u xrpl-tail -f   (set LOG_FILE in .env for a rotating file as well)
+#
+# Exit codes: 0 ok/stopped · 1 ledgers failed/stopped early · 2 config/args ·
+# 3 node lacks part of range · 4 node/Mongo unreachable · 5 another instance holds the
+# lock · 6 internal error. 2, 3 and 5 are not retried (a restart cannot fix them);
+# 1, 4 and 6 are restarted after RestartSec.
+
+[Unit]
+Description=XRPL ingest: live tail into MongoDB
+Wants=network-online.target
+After=network-online.target mongod.service xrpld.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest tail
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3 5
+# SIGTERM = graceful stop (in-flight work finishes); SIGKILL after TimeoutStopSec.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+# Spec value. tail is a single process, so control-group and mixed behave the same here
+# (see xrpl-backfill.service for why the difference matters there).
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
