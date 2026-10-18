@@ -68,6 +68,17 @@ def test_verify_repair_fixes_and_exits_0(cli_main, node, store, capsys):
     assert store.meta.count_documents({"kind": "backfill_chunk"}) == 0
 
 
+def test_verify_repair_and_fetch_ensure_indexes(cli_main, node, store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(store, "ensure_indexes", lambda: calls.append(1))
+    save(store, 1, 2, 3)
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 0
+    assert calls == []  # read-only
+    assert cli_main(["verify", "--start", "1", "--end", "3", "--repair"]) == 0
+    assert cli_main(["fetch", "--ledger", "32570"]) == 0
+    assert calls == [1, 1]
+
+
 def test_verify_repair_still_failing_exits_1(cli_main, node, store, capsys):
     save(store, 1, 2)
     node.script[3] = [RpcError("lgrNotFound")]

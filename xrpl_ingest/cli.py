@@ -257,6 +257,8 @@ async def _verify_with_node(cfg: Config, store: MongoStore, start: int, end: int
                 raise  # main(): exit 4 (unreachable) or 2 (wrong network)
             node_error, node_ranges = e, None
             print(f"node: error: {_describe(e)}; running the offline checks only")
+        if repair:  # writes: same unique indexes as tail/backfill/fetch
+            await asyncio.to_thread(store.ensure_indexes)
         s = await repair_range(source if node_ranges is not None else None, store, start, end,
                                node_ranges, retry=retry_policy(cfg), concurrency=cfg.concurrency,
                                stop_check=stop, emit=print, window=VERIFY_WINDOW,
