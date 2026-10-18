@@ -20,7 +20,10 @@ HEADER = re.compile(r"^\[([A-Za-z0-9_]+)\]\s*$")
 
 NODE_SIZES = ("tiny", "small", "medium", "large", "huge")
 
-WS_ADMIN = ["port = 6006", "ip = 127.0.0.1", "admin = 127.0.0.1", "protocol = ws"]
+# Same as the [port_ws_admin_local] stanza of the xrpld 3.4.1 example cfg (send_queue_limit
+# included); only used when the stanza is missing, an existing one is never changed.
+WS_ADMIN = ["port = 6006", "ip = 127.0.0.1", "admin = 127.0.0.1", "protocol = ws",
+            "send_queue_limit = 500"]
 
 
 def _split(text: str):

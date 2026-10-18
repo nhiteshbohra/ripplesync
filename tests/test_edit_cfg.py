@@ -51,10 +51,18 @@ def test_idempotent():
     assert once.count("port_ws_admin_local") == 2  # server line + stanza header
 
 
+def test_new_ws_stanza_matches_example_cfg():
+    s = sections(edit_cfg.apply(SAMPLE, db_path="/d", history="full", node_size="huge", peers=[]))
+    assert s["port_ws_admin_local"] == [
+        "port = 6006", "ip = 127.0.0.1", "admin = 127.0.0.1", "protocol = ws", "send_queue_limit = 500",
+    ]
+
+
 def test_existing_ws_stanza_not_overwritten():
     text = SAMPLE + "\n[port_ws_admin_local]\nport = 7777\nip = 127.0.0.1\nadmin = 127.0.0.1\nprotocol = ws\n"
     s = sections(edit_cfg.apply(text, db_path="/d", history="full", node_size="huge", peers=[]))
     assert s["port_ws_admin_local"][0] == "port = 7777"
+    assert "send_queue_limit = 500" not in s["port_ws_admin_local"]  # user's stanza left exactly as is
 
 
 def test_empty_file_and_peers():
