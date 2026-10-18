@@ -23,14 +23,50 @@ async def no_sleep(_seconds):
     return None
 
 
+HANDLED_SIGNALS = [getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGBREAK")
+                   if hasattr(signal, n)]
+
+
 @pytest.fixture(autouse=True)
 def isolated_stop_signal(monkeypatch):
-    """Every test starts un-stopped, and the SIGTERM handler of the pytest process is put
-    back afterwards (cli.main and pool-worker code install one)."""
+    """Every test starts un-stopped, and the SIGTERM / SIGINT / SIGBREAK handlers of the
+    pytest process are put back afterwards (cli.main and pool-worker code install them)."""
     monkeypatch.setattr(stopflag, "_signalled", False)
-    previous = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(stopflag, "_interrupts", 0)
+    previous = {s: signal.getsignal(s) for s in HANDLED_SIGNALS}
     yield
-    signal.signal(signal.SIGTERM, previous)
+    for s, h in previous.items():
+        signal.signal(s, h)
+
+
+@pytest.fixture
+def isolated_environ(monkeypatch):
+    """os.environ restored after the test, and none of our variables inherited from the
+    developer's shell (cli.main loads a .env into os.environ)."""
+    from xrpl_ingest.config import ENV_VARS, PATH_ENV_VARS
+    saved = dict(os.environ)
+    for name in [n for n, _ in ENV_VARS] + list(PATH_ENV_VARS):
+        os.environ.pop(name, None)
+    yield os.environ
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture
+def restore_logging():
+    """Root logger handlers/level put back (for tests that run the real setup_logging)."""
+    import logging
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield root
+    for h in list(root.handlers):
+        if h not in handlers:
+            root.removeHandler(h)
+            h.close()
+    for h in handlers:
+        if h not in root.handlers:
+            root.addHandler(h)
+    root.setLevel(level)
 
 
 @pytest.fixture
