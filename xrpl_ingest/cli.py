@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("verify", help="find missing ledgers and tx-count mismatches in a range")
     v.add_argument("--start", type=int, required=True)
     v.add_argument("--end", type=int, required=True)
+    add_data_parsers(sub, v)
 
     sub.add_parser("status", help="show node and database state")
     return p
@@ -72,8 +73,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 remaining = asyncio.run(_run_retry(cfg, store, args.max_rounds, stop))
                 print(f"remaining failed: {remaining}")
                 return 1 if remaining else 0
-            if args.command == "verify":
-                return _verify(store, args.start, args.end)
+            if args.command in DATA_COMMANDS:  # verify, fetch, tx
+                return DATA_COMMANDS[args.command](cfg, store, args, stop)
             if args.command == "status":
                 return asyncio.run(_status(cfg, store, stop))
         finally:
@@ -152,3 +153,45 @@ async def _status(cfg: Config, store: MongoStore, stop=lambda: False) -> int:
         await source.close()
     print(f"database: {await asyncio.to_thread(store.stats)}")
     return code
+
+
+# -- data commands: verify --repair/--deep, fetch, tx ----------------------------------------
+# Kept together at the end (imports inside functions) so they stay separate from startup code.
+
+def add_data_parsers(sub, verify: argparse.ArgumentParser) -> None:
+    verify.add_argument("--repair", action="store_true",
+                        help="re-ingest the missing / tx-count-mismatch ledgers found "
+                             "(exit 0 if all OK afterwards, 1 if some remain, 4 node unreachable)")
+
+
+def _verify_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
+    if not args.repair:
+        return _verify(store, args.start, args.end)
+    if args.start > args.end:
+        print(f"verify: --start ({args.start}) must be <= --end ({args.end})", file=sys.stderr)
+        return 2
+    return asyncio.run(_verify_repair(cfg, store, args.start, args.end, stop))
+
+
+async def _verify_repair(cfg: Config, store: MongoStore, start: int, end: int, stop) -> int:
+    from .repair import repair_range
+    source = WsSource.from_config(cfg, stop_check=stop)
+    try:
+        node_ranges, _ = await discover_node(source)  # unreachable => IngestError => exit 4
+        s = await repair_range(source, store, start, end, node_ranges, retry=retry_policy(cfg),
+                               concurrency=cfg.concurrency, stop_check=stop, emit=print,
+                               window=VERIFY_WINDOW)
+    finally:
+        await source.close()
+    print(f"repair: found {s.found}, repaired {s.repaired}, failed {s.failed}, "
+          f"node lacks {s.node_lacks}, remaining {s.remaining}")
+    if s.stopped:
+        print("stopped early: the rest of the range was not verified")
+    elif s.remaining:
+        print(f"{s.remaining} problem ledger(s) remain")
+    else:
+        print("OK")
+    return 0 if s.ok else 1
+
+
+DATA_COMMANDS = {"verify": _verify_cmd}
