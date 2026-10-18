@@ -94,15 +94,16 @@ For people who already know Linux, xrpld and MongoDB. Everyone else: follow Step
 DB_PATH=/data/xrpld/db/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
 # 3. Wait until server_state is "full"
 curl -s http://127.0.0.1:5005 -d '{"method":"server_info"}' | python3 -m json.tool | grep -E '"(server_state|complete_ledgers)"'
-# 4. MongoDB 8.0 (see Step 4), then this program:
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env && chmod 600 .env && nano .env        # set MONGO_URI
+# 4. MongoDB 8.0 (see Step 4), then this program (venv, .env, tests, systemd units):
+bash setup/setup_ubuntu.sh ingest
+source .venv/bin/activate
 python -m xrpl_ingest doctor                               # everything OK?
-python -m xrpl_ingest backfill --start 32570 --end 33570   # small trial
-python -m xrpl_ingest verify   --start 32570 --end 33570
-python -m xrpl_ingest tail                                 # live (better: as a service, Step 7)
-python -m xrpl_ingest backfill                             # full history (resumable)
+python -m xrpl_ingest backfill --start 32570 --end 33569   # small trial (1000 ledgers)
+python -m xrpl_ingest verify   --start 32570 --end 33569
+cp backfill_range.txt.example backfill_range.txt           # full range: 32570 .. latest
+sudo systemctl enable --now xrpl-tail                      # live ledgers, from day 1
+sudo systemctl start xrpl-backfill                         # full history (resumable)
+python -m xrpl_ingest status                               # progress and ETA
 ```
 
 ---
@@ -134,28 +135,29 @@ The number of ledgers is large: xrpl.org listed "81,000,000+" ledgers for full h
 | Software | Version | Notes |
 |---|---|---|
 | xrpld | **3.4.x** (latest release 3.4.1, 2026-10-10) | `rippled` was renamed `xrpld` in 3.2.0. Old guides say `rippled`. |
-| MongoDB | **7.0 or 8.0** | **Not 9.0.** Our pinned driver (`pymongo>=4.9,<4.11`) fully supports 7.0 and 8.0. MongoDB 9.0 needs pymongo 4.18 ([driver compatibility](https://www.mongodb.com/docs/drivers/compatibility/?driver-language=python&python-driver-framework=pymongo)). 7.0 ends support 2027-08-31, 8.0 ends 2029-10-31. **Use 8.0 for new installs.** |
-| Python | **3.10 or newer** | 3.12 is the tested version. |
+| MongoDB | **7.0 or 8.0** | **Not 9.0.** Our pinned driver (`pymongo>=4.9,<4.11`) fully supports 7.0 and 8.0. MongoDB 9.0 needs pymongo 4.17 or newer (4.18 for full support) ([driver compatibility](https://www.mongodb.com/docs/drivers/compatibility/?driver-language=python&python-driver-framework=pymongo)). The cap `<4.11` exists because the test library `mongomock` breaks on newer pymongo. 7.0 ends support 2027-08-31, 8.0 ends 2029-10-31. **Use 8.0 for new installs.** `doctor` warns if the server is not 7.0 or 8.0. |
+| Python | **3.10 or newer** | 3.12 is the tested and recommended version. |
 | Python packages | from `requirements.txt` only | `pymongo`, `websockets`, `python-dotenv`, plus `pytest`, `mongomock` for tests. |
 
 ## Which operating system for what
 
 There are three parts: the **node** (xrpld), **MongoDB**, and **this program**. They can run on different machines.
 
-| | Linux server (x86_64) | macOS | Windows | WSL2 (Linux inside Windows) | Docker |
-|---|---|---|---|---|---|
-| **xrpld node** | **Yes.** Ubuntu 20.04+ / Debian 11+ via `apt`; RHEL / Rocky / Alma 9+ via `dnf`/`yum` | Development only (build from source) | Development only (build from source) | Testing only. **Not for full history** (see below) | No official XRPLF runtime image. Run xrpld on the host. |
-| **MongoDB 7.0/8.0** | Yes | Yes (Homebrew) | Yes (MSI installer, Windows service) | **Not supported by MongoDB** | Yes (official image) |
-| **This program** | Yes | Yes | Yes | Yes | Yes (`docker-compose.yml`) |
+| | Linux server (x86_64) | macOS | Windows | WSL2 (Linux inside Windows) |
+|---|---|---|---|---|
+| **xrpld node** | **Yes.** Ubuntu 20.04+ / Debian 11+ via `apt`; RHEL / Rocky / Alma 9+ via `dnf`/`yum` | Development only (build from source) | Development only (build from source; no Windows package) | Testing only. **Not for full history** (see below) |
+| **MongoDB 7.0/8.0** | Yes | Yes (Homebrew) | Yes (MSI installer, Windows service) | **Not supported by MongoDB** |
+| **This program** | Yes (systemd units in `deploy/systemd/`) | Yes (run by hand; no service template) | Yes (Task Scheduler scripts in `deploy/windows/`) | Yes |
 
 **Recommended production setup:** one Linux server (Ubuntu 24.04 LTS) for xrpld, and MongoDB on the same server on a separate disk, or on a second Linux server.
+On macOS the program runs fine from a terminal, but the node there is only for development.
 
 **WSL2 caveats:**
 
 - The Linux disk of WSL2 is an ext4 filesystem inside a virtual disk file (VHDX). ext4 has the 16 TB single-file limit, so a full-history NuDB cannot work there.
 - A database on `/mnt/c/...` (a Windows drive) is far too slow for NuDB.
 - MongoDB says it is not supported on WSL ([MongoDB Windows install page](https://www.mongodb.com/docs/manual/administration/install-community-windows/)). If you use WSL, install MongoDB on Windows itself and connect from WSL.
-- WSL networking: to reach a Windows service at `127.0.0.1` from inside WSL, use mirrored networking (see [Troubleshooting](#troubleshooting)).
+- WSL networking: to reach a Windows service at `127.0.0.1` from inside WSL, use mirrored networking (Windows 11 22H2 or later; see [Troubleshooting](#troubleshooting)). **UNVERIFIED** with this project.
 - systemd inside WSL must be switched on (`/etc/wsl.conf`: `[boot]` then `systemd=true`, then `wsl --shutdown`).
 
 ---
@@ -240,18 +242,22 @@ sudo systemctl start xrpld.service
 
 ### Option C: the setup script (Ubuntu)
 
-The script `setup/setup_ubuntu.sh` does Option A plus Step 2 for you. It makes a backup of the config first.
+The script `setup/setup_ubuntu.sh` does Option A plus Step 2 for you (Ubuntu 20.04+ / Debian 11+, x86_64, glibc 2.31+). It makes a backup of the config first.
 
 ```bash
-bash setup/setup_ubuntu.sh check        # read-only preflight: RAM, disk, filesystem. Changes nothing.
+bash setup/setup_ubuntu.sh check        # read-only preflight: OS, glibc, RAM, disk, filesystem. Changes nothing.
 DB_PATH=/data/xrpld/db/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
+# later (Step 5):  bash setup/setup_ubuntu.sh ingest      # or: all = node + ingest
 ```
 
-Useful variables: `DB_PATH` (NuDB folder on the big XFS disk), `HISTORY_MODE=full|pruned`, `NODE_SIZE` (`tiny small medium large huge`), `FIXED_PEERS="host port;host port"`, `FORCE=1` (continue past failed checks).
-`DB_PATH` must be a dedicated folder. The script refuses system folders because it runs `chown -R` on it.
-**UNVERIFIED:** the script has never run on a real Ubuntu machine yet.
+What `node` does: installs xrpld from the XRPLF apt repo, **checks the key fingerprint itself** (it refuses a key that is not `B655416741221F780FBCFBC9AA84D41A11D29FA9`), edits `/etc/xrpld/xrpld.cfg` (backup first), starts xrpld and prints the firewall note.
 
-`setup_all.sh` (repo root) installs MongoDB + xrpld + this program in one go. It defaults to a small **pruned** node for testing. It overlaps with `setup/setup_ubuntu.sh`.
+Useful variables: `DB_PATH` (NuDB folder on the big XFS disk; default `/var/lib/xrpld/db/nudb`), `HISTORY_MODE=full|pruned` (default `full`), `NODE_SIZE` (`tiny small medium large huge`; default `huge`), `FIXED_PEERS="host port;host port"`, `FORCE=1` (continue past failed checks).
+`DB_PATH` must be a dedicated folder. The script runs `chown -R` on it, so `setup/db_path_guard.sh` refuses system folders and anything under `/home`, `/root` or `/run/user` (the xrpld service cannot see those, because of `ProtectHome=true`).
+Shared helper code is in `setup/common.sh`.
+**UNVERIFIED:** the scripts are not tested on a real host yet (only `bash -n` and shellcheck).
+
+`setup_all.sh` (repo root) installs MongoDB 8.0 + xrpld + this program in one go. It defaults to a small **pruned** node (`HISTORY_MODE=pruned`, `NODE_SIZE=medium`) for testing; set `HISTORY_MODE=full` for this project. On WSL it skips MongoDB (not supported there) and prints how to use MongoDB on Windows. It overlaps with `setup/setup_ubuntu.sh`.
 
 ### Files the package installs
 
@@ -452,7 +458,9 @@ python -m xrpl_ingest doctor --node
 ```
 
 Option c) is the best test, because it uses the same websocket and the same network check as the ingest.
-`bash setup/check_node.sh` shows the same basic fields (needs the venv from Step 5).
+It shows `server_state`, `network_id`, `complete_ledgers`, the validated ledger, peers and `build_version`.
+A state other than `full`, `proposing` or `validating` is a warning (exit `1`).
+`bash setup/check_node.sh` runs exactly `python -m xrpl_ingest doctor --node` (needs the venv from Step 5).
 
 ### 3.3 Reading `complete_ledgers`
 
@@ -558,19 +566,9 @@ brew services start mongodb-community@8.0
    Restart-Service MongoDB
    ```
 
-### 4.5 Docker
+On Ubuntu, `setup_all.sh` does 4.1 for you (MongoDB 8.0; it prints the MongoDB key fingerprint but cannot pin it, because MongoDB publishes none to compare with).
 
-The repo's `docker-compose.yml` starts MongoDB together with this program, see [Step 7](#step-7-run-as-a-service).
-To run MongoDB alone with the official image ([MongoDB on Docker](https://www.mongodb.com/docs/manual/administration/install-community-docker/)):
-
-```bash
-docker run --name mongodb -p 127.0.0.1:27017:27017 -v mongodata:/data/db -d mongodb/mongodb-community-server:8.0-ubuntu2204
-```
-
-**UNVERIFIED:** the tag `8.0-ubuntu2204`. Pick an existing 8.0 tag from the [tag list](https://hub.docker.com/r/mongodb/mongodb-community-server/tags). Do not use `latest`: it is 9.0 now.
-The image needs a CPU with AVX.
-
-### 4.6 Enable authentication (password)
+### 4.5 Enable authentication (password)
 
 A fresh MongoDB has **no password**. Anyone who can reach port 27017 can read and delete data. Turn on authentication.
 Source: [SCRAM authentication](https://www.mongodb.com/docs/manual/tutorial/configure-scram-client-authentication/).
@@ -615,7 +613,7 @@ python3 -c "import getpass, urllib.parse; print(urllib.parse.quote(getpass.getpa
 
 Alternative: put the whole URI into a file and set `MONGO_URI_FILE` (see [Step 5](#step-5-install-this-program)).
 
-### 4.7 Storage and memory advice
+### 4.6 Storage and memory advice
 
 - **Filesystem:** MongoDB strongly recommends **XFS** for WiredTiger on Linux ([Production Notes](https://www.mongodb.com/docs/manual/administration/production-notes/)).
 - **Separate disk:** do not share the disk with NuDB. Both need many IOPS.
@@ -642,10 +640,10 @@ The program runs on Linux, macOS and Windows. It needs Python 3.10 or newer (3.1
 
 | OS | Command |
 |---|---|
-| Ubuntu / Debian | `sudo apt-get install -y python3 python3-venv python3-pip` |
+| Ubuntu / Debian | `sudo apt-get install -y python3 python3-venv python3-pip`. Ubuntu 24.04 ships 3.12 (`python3.12 python3.12-venv`). `setup/setup_ubuntu.sh ingest` uses `python3.12` when it is on PATH, else `python3` (must be 3.10+). |
 | RHEL / Rocky / Alma 9 | `sudo dnf install -y python3.12 python3.12-pip` (**UNVERIFIED** package names; `python3` 3.9 of RHEL 9 is too old) |
 | macOS | `brew install python@3.12` |
-| Windows | `winget install Python.Python.3.12` or the installer from [python.org](https://www.python.org/downloads/windows/). Tick "Add python.exe to PATH". |
+| Windows | The installer from [python.org](https://www.python.org/downloads/windows/) (keep "py launcher" ticked), or `winget install Python.Python.3.12`. `deploy\windows\setup-windows.ps1` needs `py -3.12`. |
 
 Note: for Python 3.12 the last Windows/macOS installer from python.org is 3.12.10. Newer 3.12 releases are source only. Python 3.13 should also work (not tested).
 
@@ -671,7 +669,13 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Windows PowerShell:
+Windows: the script `deploy\windows\setup-windows.ps1` does all of 5.3 and 5.4 (creates `.venv` with `py -3.12`, installs `requirements.txt`, copies `.env.example` to `.env` if missing, runs `doctor`). It does not install MongoDB or xrpld. **Not tested on a real host.**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\setup-windows.ps1
+```
+
+Or by hand, in Windows PowerShell:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -692,15 +696,9 @@ pip install -r requirements.txt
 ```
 
 `requirements.txt` is the only install file. It contains the runtime and the test packages.
+There is no installable package and no short command: always run the program as `python -m xrpl_ingest ...` with the venv active (or with `.venv/bin/python`, `.venv\Scripts\python.exe`).
 
-Optional: install the short command `xrpl-ingest`:
-
-```bash
-pip install -e .
-xrpl-ingest status        # same as: python -m xrpl_ingest status
-```
-
-`pip install -e .` uses `pyproject.toml`. pip may download `setuptools` for the build step, so it needs internet once.
+On Ubuntu, `bash setup/setup_ubuntu.sh ingest` does 5.3 and 5.4 for you: venv, requirements, `.env` (chmod 600; it asks for `MONGO_URI` with hidden input), the tests, `doctor --mongo`, and the two systemd units (see [Step 7](#step-7-run-as-a-service)).
 
 Optional: run the tests. Why: they prove the install works on this machine.
 
@@ -716,12 +714,14 @@ The program reads its settings from environment variables and from a `.env` file
 
 **Where `.env` is read from:**
 
-1. If `ENV_FILE` is set (as a real environment variable), that file is used.
-2. Otherwise `<base>/.env` is used. The base folder is `XRPL_INGEST_HOME` if set, else the **current folder** when you start the command.
-3. The program does **not** search parent folders.
+1. If `ENV_FILE` is set in the process environment, that file is used (a missing `ENV_FILE` file is a config error).
+2. Otherwise `<XRPL_INGEST_HOME>/.env`, or `<current folder>/.env` when `XRPL_INGEST_HOME` is not set.
+3. The program does **not** search parent folders. No `.env` at all is fine: then only the process environment is used.
+4. **Process environment variables win** over values in `.env`. (`config` shows `env (overrides .env)` for such a value.)
 
-Relative paths (stop file, range file, log file, lock files) are resolved against the base folder. The base folder is the folder of the loaded `.env` when `XRPL_INGEST_HOME` is not set.
-So: either `cd` into the project folder before every command, or set `XRPL_INGEST_HOME`.
+**The base folder** is `XRPL_INGEST_HOME` (from the process environment or from `.env`), else the folder of the loaded `.env`, else the current folder.
+Relative paths (stop file, range file, log file, lock files, `MONGO_URI_FILE`) are resolved against the base folder.
+So: either `cd` into the project folder before every command, or set `XRPL_INGEST_HOME`. The systemd units and `deploy\windows\run.cmd` set `XRPL_INGEST_HOME` to the repo folder.
 
 Create the file:
 
@@ -748,13 +748,15 @@ All settings are optional except `MONGO_URI`. Defaults are shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MONGO_URI` | (required) | MongoDB connection string, e.g. `mongodb://xrpl_ingest:<pw>@127.0.0.1:27017/?authSource=admin`. Must start with `mongodb://` or `mongodb+srv://`. |
-| `MONGO_URI_FILE` | empty | Path of a file that contains the URI. Keeps the password out of `.env` (useful for Docker secrets). |
+| `MONGO_URI` | (required, or `MONGO_URI_FILE`) | MongoDB connection string, e.g. `mongodb://xrpl_ingest:<pw>@127.0.0.1:27017/?authSource=admin`. Must start with `mongodb://` or `mongodb+srv://`. |
+| `MONGO_URI_FILE` | empty | Path of a file that holds the URI on exactly one line (max 4096 bytes). Keeps the password out of `.env`; `chmod 600` the file. **Setting both `MONGO_URI` and `MONGO_URI_FILE` is a config error.** |
 | `DB_NAME` | `xrpl_data_collection` | Database name. **Use a fresh name if an old (legacy) database causes index errors.** |
 | `SERVERS` | `ws://127.0.0.1:6006` | Your node's admin websocket. Comma-separated; first is preferred, others are failover. **Never list testnet servers.** |
 | `EXPECTED_NETWORK_ID` | `0` | `0` = mainnet. A server reporting another id is refused. `none` switches the check off (not recommended). |
 | `MONGO_SERVER_SELECTION_TIMEOUT_MS` | `10000` | How long to wait for MongoDB before "unreachable". |
-| `MONGO_SOCKET_TIMEOUT_MS` | `120000` | Maximum time for one MongoDB operation. |
+| `MONGO_SOCKET_TIMEOUT_MS` | `120000` | Maximum time for one MongoDB network operation; `0` = no limit. |
+
+If the same option (`serverSelectionTimeoutMS`, `socketTimeoutMS`) is written inside `MONGO_URI`, the URI value wins.
 
 **Collections** (defaults are the legacy names; do not change them for an existing database)
 
@@ -770,7 +772,7 @@ All settings are optional except `MONGO_URI`. Defaults are shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NUM_PROCESSES` | `4` | Backfill worker processes. **Windows: at most 61** (Python limit). |
+| `NUM_PROCESSES` | `4` | Backfill worker processes. **Windows: at most 61** (process pool limit; more is a config error). |
 | `CONCURRENCY` | `16` | Ledger requests in flight per process. Total load = `NUM_PROCESSES x CONCURRENCY`. |
 | `CHUNK_SIZE` | `1000` | Ledgers per backfill chunk. **Do not change it after the backfill has started:** progress is stored per chunk, and a new size means a new chunk grid (work is redone, `doctor` warns). |
 | `MAX_RETRIES` | `5` | Attempts per ledger before it goes to the failed collection. |
@@ -784,21 +786,23 @@ All settings are optional except `MONGO_URI`. Defaults are shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `XRPL_INGEST_HOME` | folder of the loaded `.env`, else current folder | Base folder for `.env` and all relative paths. Set it as a real environment variable (for example in the service file). |
-| `ENV_FILE` | empty | Explicit path of the `.env` file. Set it as a real environment variable. |
+| `XRPL_INGEST_HOME` | folder of the loaded `.env`, else current folder | Base folder for relative paths. To also find `.env` there, set it in the process environment (service file, shell), not only inside `.env`. |
+| `ENV_FILE` | empty | Explicit path of the `.env` file. Set it in the process environment. |
 | `PROCESS_STATUS_FILE` | `process_status.txt` | The stop file, see [Stopping](#66-stopping-gracefully). |
 | `BACKFILL_RANGE_FILE` | `backfill_range.txt` | The range file, see [Range file](#62-the-range-file-backfill_rangetxt). |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
-| `LOG_FILE` | empty | Empty = log to the screen (stderr) only. A path = also write a rotating log file. |
+| `LOG_FILE` | empty | Empty = log to the screen (stderr) only. A path (e.g. `logs/xrpl_ingest_tail.log`) = also write a rotating log file. **Give each command that runs at the same time its own file** (see [Logs](#67-logs)). |
 | `LOG_MAX_MB` | `100` | Size of one log file before it rotates. |
-| `LOG_BACKUPS` | `10` | How many old log files to keep. |
-| `MIN_FREE_GB` | `0` | Free-disk warning threshold for `doctor`; `0` = off. |
+| `LOG_BACKUPS` | `10` | How many old log files to keep (`0` allowed). |
+| `MIN_FREE_GB` | `0` | Disk guard; `0` = off. If the filesystem that holds the MongoDB database has less free space than this, `tail` / `backfill` / `retry-failed` stop gracefully (exit `1`) before the disk is full. The number comes from MongoDB itself (`dbStats`), checked about once a minute, so it also works when MongoDB is on another host. `doctor` warns too. |
 
-See your effective settings, with passwords hidden and the source of each value (environment, `.env` or default):
+See your effective settings, with passwords hidden and the source of each value:
 
 ```bash
 python -m xrpl_ingest config
 ```
+
+Each line looks like `NAME = value    [source]`. The source is `env`, `.env`, `env (overrides .env)` or `default`. Paths are shown fully resolved. A query string in `MONGO_URI` is shown as `?<n option(s) hidden>`.
 
 ### 5.6 Run `doctor`
 
@@ -807,10 +811,20 @@ python -m xrpl_ingest doctor
 ```
 
 Why: it checks everything before you start a run that may last weeks.
-It checks: Python version, installed package versions, the effective config (passwords hidden), resolved paths, `.env` file permissions (Linux/macOS), MongoDB (ping, version, authentication, free space), the node (`server_state`, `network_id`, `complete_ledgers`, validated ledger, peers, version), free disk, RAM, the `NUM_PROCESSES` limit on Windows, chunk documents with a different `CHUNK_SIZE`, index conflicts in an old (legacy) database, and stale lock files.
+It checks: Python version; installed package versions against `requirements.txt`; that the config is valid; resolved paths (with a warning for hidden control characters such as a stray `\r`); `.env` file permissions (Linux/macOS; not checked on Windows); lock files; free disk in the base folder; RAM; `NUM_PROCESSES` (and the Windows limit 61); MongoDB (reachable, version 7.0/8.0, authenticated user, free space vs `MIN_FREE_GB`); index conflicts and duplicate hashes in an old (legacy) database; chunk documents made with a different `CHUNK_SIZE`; and the node (`server_state`, `network_id`, `complete_ledgers`, validated ledger, peers, `build_version`). At the end it prints the effective configuration like `config`.
 
-- `doctor --node`: only the node. `doctor --mongo`: only MongoDB. `doctor --json`: machine-readable output.
-- Exit code: `0` all OK, `1` warnings, `2` config error, `4` node or MongoDB unreachable.
+Each line starts with `OK`, `WARN`, `FAIL` or `INFO`, for example:
+
+```
+OK    python           3.12.10 (requires >=3.10)
+WARN  pymongo          4.8.0 installed; requires >=4.9,<4.11 (pip install -r requirements.txt)
+FAIL  mongo            mongodb://127.0.0.1:27017 unreachable: ServerSelectionTimeoutError: ...
+result: 1 failure(s), 1 warning(s) -> exit 4
+```
+
+- `doctor --node`: only the node checks. `doctor --mongo`: only the MongoDB checks. Both flags: both. `doctor --json`: machine-readable output.
+- Every network check uses a short 5-second timeout.
+- Exit code: `0` all OK, `1` warnings, `2` config problem (also wrong network or bad credentials), `4` node or MongoDB unreachable. The worst one wins (2 > 4 > 1 > 0).
 
 ---
 
@@ -831,6 +845,7 @@ python -m xrpl_ingest backfill --start 32570 --end 33569
 python -m xrpl_ingest verify   --start 32570 --end 33569
 sudo systemctl enable --now xrpl-tail          # or: python -m xrpl_ingest tail
 python -m xrpl_ingest backfill                 # range from backfill_range.txt or defaults
+                                               # (or as a service: sudo systemctl start xrpl-backfill)
 ```
 
 Size estimate: after the trial, look at the database size in `mongosh` (`use xrpl_data_collection` then `db.stats()`).
@@ -841,7 +856,8 @@ After a trial of early history it is much further behind. Then `tail` starts at 
 
 ### 6.2 The range file (`backfill_range.txt`)
 
-When you run `backfill` **without** `--start` and `--end`, the range comes from the file `backfill_range.txt` in the base folder.
+When you run `backfill` **without** `--start` and `--end`, the range comes from the file `backfill_range.txt` in the base folder (setting `BACKFILL_RANGE_FILE` changes the name).
+The systemd unit and the Windows task for backfill use this file too.
 Copy the example file to start:
 
 ```bash
@@ -878,42 +894,54 @@ end   = 60_000_000
 Rules:
 
 - **Precedence:** command line > file > defaults. If you give `--start` **or** `--end`, the file is ignored completely (the log says so).
+- `--no-range-file` skips the file and uses the defaults. `--range-file PATH` reads another file.
 - No file = defaults (`32570` to `latest`), with an INFO log line.
 - Keys are not case-sensitive. Only `start` and `end` are allowed.
 - An unknown key, a key given twice, or a line without `=` is a config error (exit code `2`). The message names the file and the line.
+- At most 4096 bytes. UTF-8 (with or without BOM) or UTF-16 with BOM, like `.env`.
 - The program reads the file once at start and never writes it. Changes apply at the next start.
-- The file is in `.gitignore` (it is your local choice).
+- The file is in `.gitignore` (it is your local choice). The repo ships `backfill_range.txt.example`.
 
-**Progress:** `status` shows progress for the range in the file: chunks done / total, percent, failed ledgers, speed and estimated time left.
+**Progress:** `status` shows progress for the range in the file: chunks done / total, percent, failed ledgers, speed, when the last chunk finished, and estimated time left. The speed is computed from the finish times of the stored chunks.
 
 ```bash
 python -m xrpl_ingest status
 ```
 
+Example output (the numbers are invented):
+
+```
+node complete_ledgers: 32570-105000300  latest validated: 105000300
+database: {'ledgers': 1000, 'transactions': 1234, 'failed': 0, 'checkpoint': 0, 'chunks_done': 1}
+backfill range 32570-105000300 (file /opt/xrpl-ingest/backfill_range.txt): chunks 1/104968 (0.0%), failed ledgers 0, 850 ledgers/s, last chunk 2s ago, ETA 1d10h (at that rate)
+```
+
 ### 6.3 Command reference
 
-Run every command as `python -m xrpl_ingest <command>` (or `xrpl-ingest <command>` after `pip install -e .`). `--help` works on every command.
+Run every command as `python -m xrpl_ingest <command>`. `--help` works on every command and lists the exit codes.
 
 | Command | What it does | Example |
 |---|---|---|
 | `status` | Node `complete_ledgers` and latest ledger; database counts; checkpoint; range-file progress. DB part is shown even if the node is down. | `status` |
 | `backfill [--start N] [--end M] [--range-file PATH] [--no-range-file]` | Copies old ledgers in chunks, many processes. Resumable. Only ledgers the node has. | `backfill --start 32570 --end 33569` |
 | `tail` | Follows new validated ledgers. Saves a checkpoint after each ledger. | `tail` |
-| `retry-failed [--max-rounds N]` | Fetches the ledgers in the failed collection again (default 5 rounds). Connection-loss failures are retried last, one at a time. | `retry-failed --max-rounds 10` |
-| `verify --start N --end M [--repair] [--deep]` | Finds missing ledgers and ledgers whose stored transaction count is wrong. `--repair` fetches exactly those again. `--deep` also compares stored transaction hashes with the node and checks the parent-hash chain. | `verify --start 32570 --end 1000000 --repair` |
-| `fetch --ledger N\|validated` | Fetches one ledger (or the newest validated one) and stores it. Removes it from the failed list on success. | `fetch --ledger 32570` |
-| `tx --hash H` | Compares the stored transaction with the node's answer (spot check). | `tx --hash <64-hex-character hash>` |
+| `retry-failed [--max-rounds N]` | Fetches the ledgers in the failed collection again (default 5 rounds). Connection-loss failures are retried last, one at a time. Prints `remaining failed: <n>`. | `retry-failed --max-rounds 10` |
+| `verify --start N --end M [--repair] [--deep]` | Finds missing ledgers and ledgers whose stored transaction count is wrong. `--repair` fetches exactly those again (with `--deep` also the ledgers whose transaction hashes differ). `--deep` also checks the parent-hash chain (offline) and compares the stored transaction hashes with the node's list. | `verify --start 32570 --end 1000000 --repair` |
+| `fetch --ledger N\|validated` | Fetches one ledger (or the newest validated one) now and stores it. Removes it from the failed list on success. Does not touch chunk progress. | `fetch --ledger 32570` |
+| `tx --hash H` | Compares the stored transaction (64 hex digits hash) with the node's answer (spot check). | `tx --hash <64-hex-digit hash>` |
 | `doctor [--node] [--mongo] [--json]` | Checks the whole setup (see 5.6). | `doctor --node` |
-| `health [--max-lag N] [--max-age S]` | For monitoring: is `tail` up to date? Healthy when the checkpoint is at most N ledgers behind the node (default 50) and was updated in the last S seconds (default 120). | `health --max-lag 50 --max-age 120` |
+| `health [--max-lag N] [--max-age S]` | For monitoring: is `tail` keeping up? Healthy when the checkpoint trails the node's validated ledger by at most N ledgers (default 50) and was written in the last S seconds (default 120). Prints one line: `healthy: ...`, `lagging: ...`, `stale: ...` or `unhealthy: ...`. Exit `0` healthy, `1` lagging / stale / no checkpoint yet, `2` node on the wrong network, `4` unreachable. | `health --max-lag 50 --max-age 120` |
 | `config` | Prints the effective settings (passwords hidden) and where each value came from. | `config` |
 
 Details:
 
-- `backfill --no-range-file`: ignore `backfill_range.txt` and use the defaults.
+- `backfill --no-range-file`: ignore `backfill_range.txt` and use the defaults (32570 to latest).
 - `backfill --range-file PATH`: use another range file.
-- `verify --deep`: the hash comparison asks the node for every ledger, so it is slow and needs the node. The parent-hash check works without the node.
-- `fetch` does not mark a backfill chunk as done. It only stores that ledger.
-- `tx --hash`: exit code `1` if the stored document differs from the node or is missing.
+- `verify --deep`: the hash comparison asks the node for every ledger, so it is slow. If the node is unreachable, the offline checks still run and the output says so.
+- `verify --repair`: exit `0` if everything is OK afterwards, `1` if problems remain, `4` if the node is unreachable.
+- `fetch`: exit `0` stored, `1` failed (recorded in the failed collection), `2` usage, `4` node or MongoDB unreachable.
+- `tx --hash`: exit `0` same, `1` different, not validated, or missing (stored or on the node), `2` usage, `4` unreachable.
+- Only `tail`, `backfill` and `retry-failed` take a lock and react to the stop file and to the first Ctrl+C.
 
 ### 6.4 Exit codes
 
@@ -922,20 +950,23 @@ Every command ends with one of these codes. Scripts and services can react to th
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | OK | Nothing. |
-| `1` | Some ledgers failed, the run stopped early (stop file / signal), `verify` found problems, `tx` differs, `health` lagging/stale, or `doctor` warnings | Read the log. Run `retry-failed` or `verify --repair`. |
-| `2` | Config or argument error (also: node on the wrong network, bad range file) | Fix `.env`, the range file or the command. Retrying will not help. |
-| `3` | `backfill`: no failures, but the node does not have part of the range yet | Normal while the node downloads history. Run again later. |
+| `1` | Some ledgers failed, the run stopped early (stop file, signal, or `MIN_FREE_GB`), `verify` found problems, `health` lagging/stale, or `doctor` warnings | Read the log. Run `retry-failed` or `verify --repair`. |
+| `2` | Config or usage error (also: node on the wrong network, bad Mongo credentials, bad range file) | Fix `.env`, the range file or the command. Retrying will not help. |
+| `3` | `backfill`: no failures, but the node does not have part of the range yet (see its `complete_ledgers`) | Normal while the node downloads history. Run again later. |
 | `4` | Node or MongoDB unreachable or failing | Check that xrpld / mongod run and the URIs are right. |
 | `5` | Another instance of the same command is already running (lock held) | The message shows PID, host and start time of the other one. |
-| `6` | Unexpected internal error (a bug) | Keep the log and report it. |
-| `130` | Hard stop by Ctrl+C (second Ctrl+C) | Run again; all work is resumable. |
+| `6` | Unexpected internal error (a bug; the log has the traceback) | Keep the log and report it. |
+| `130` | Interrupted: second Ctrl+C, or Ctrl+C in a command without graceful stop | Run again; all work is resumable. |
+
+`fetch` and `tx` use their own short list, see the notes under the command table.
 
 ### 6.5 Running tail and backfill at the same time
 
-This is allowed and recommended. Each command takes its own lock file `<base>/xrpl_ingest.<command>.lock`. So one `tail` and one `backfill` can run together, but **not two backfills** and **not two tails** (the second one exits with code `5`).
+This is allowed and recommended (run `tail` from day 1 while the backfill fills the history). Each of `tail`, `backfill` and `retry-failed` takes its own lock file `<base>/xrpl_ingest.<command>.lock`. So one `tail` and one `backfill` can run together, but **not two backfills** and **not two tails** (the second one exits with code `5`).
 Both write the same way (upserts). If both happen to write the same ledger, the result is the same.
+Give each one its own `LOG_FILE` (see [Logs](#67-logs)).
 
-The lock is held by the operating system, not by the file's existence. If a process dies, the lock is free again. A leftover `.lock` file is harmless. `doctor` reports stale locks. Do not delete a lock file while its process runs.
+The lock is held by the operating system (`flock` on Linux/macOS, `msvcrt.locking` on Windows), not by the file's existence. If a process dies, the lock is free again. A leftover `.lock` file is harmless and is never deleted; it keeps the last holder's PID, host and start time. `doctor` shows each lock as running or stale. Note: `doctor` takes the lock for a moment to test it, so a command started in that exact instant may exit `5`; just start it again.
 
 ### 6.6 Stopping gracefully
 
@@ -950,19 +981,25 @@ A graceful stop finishes the ledgers in progress, starts nothing new, and exits.
 | `backfill=0` | stops only `backfill` |
 | `retry-failed=0` | stops only `retry-failed` |
 
-Keys are not case-sensitive (`CURRENT_PROCESS=0` from the old scripts works).
-The program reads the file from the top. The **first line that is about the running command** (its own key or `current_process`) decides.
-A missing or unreadable file means "keep running".
+Rules:
+
+- **Any line that applies and says `0` stops the command.** "Applies" means the key is `current_process` or the running command's own name. So a leftover `current_process=1` line can **not** hide a `tail=0` line below it.
+- Any other value (for example `=1`) means "keep running". Lines with other keys, empty lines and `#` comments are skipped.
+- Keys are not case-sensitive (`CURRENT_PROCESS=0` from the old scripts works).
+- The file is read at most once per second while the command runs.
+- A missing or unreadable file means "keep running".
+- UTF-8, UTF-8 with BOM and UTF-16 with BOM all work (so PowerShell `>` is fine).
 
 ```bash
 echo current_process=0 > process_status.txt               # Linux / macOS / cmd.exe
+echo backfill=0 > process_status.txt                      # stop only the backfill
 ```
 
 ```powershell
-Set-Content -Path process_status.txt -Value 'current_process=0'   # PowerShell
+Set-Content -Encoding ascii process_status.txt 'tail=0'    # PowerShell: stop only tail
 ```
 
-**Important:** remove the line (or write `current_process=1`) **before you start again**. Otherwise the next run stops at once.
+**Important:** remove every `=0` line that applies (or change it to `=1`) **before you start again**. Otherwise the next run stops at once. Adding a `current_process=1` line does not help while a `tail=0` line is still there.
 
 ```bash
 rm process_status.txt                                      # PowerShell: Remove-Item process_status.txt
@@ -972,20 +1009,30 @@ rm process_status.txt                                      # PowerShell: Remove-
 
 | Signal | Effect |
 |---|---|
-| SIGTERM (`kill <pid>`, `systemctl stop`, `docker stop`, launchd stop) | graceful stop |
-| Ctrl+C (SIGINT), first time | graceful stop |
-| Ctrl+C, second time | hard stop, exit code `130` |
+| SIGTERM (`kill <pid>`, `systemctl stop`) | graceful stop |
+| Ctrl+C (SIGINT), first time | graceful stop (`tail`, `backfill`, `retry-failed`) |
+| Ctrl+C, second time | abort at once, exit code `130` |
 | Ctrl+Break (SIGBREAK, Windows console) | graceful stop |
 
-On Windows, "End task" in Task Manager or Task Scheduler kills the process at once (not graceful). Use the stop file there.
-Backfill worker processes ignore Ctrl+C themselves; the main process tells them to stop.
+Ctrl+C in any other command (for example `verify`) aborts at once with `130`.
+On Windows, "End task" in Task Manager, `Stop-ScheduledTask` or "End" in Task Scheduler kills the process at once (not graceful; data stays consistent, unfinished chunks are redone). Use the stop file there.
+Backfill worker processes ignore Ctrl+C themselves; the main process tells them to stop through a shared stop event.
 
 ### 6.7 Logs
 
-- Default: logs go to the screen (stderr). Under systemd they go to the journal: `journalctl -u xrpl-tail -f`.
-- Set `LOG_FILE=logs/xrpl_ingest.log` for a rotating log file (`LOG_MAX_MB`, `LOG_BACKUPS`). Worker processes log through the main process, so there is one file.
-- Times are UTC, ISO format, ending with `Z`.
-- At start the program logs its version and all resolved paths. Check them if a file "is not found".
+- Default: logs go to the screen (stderr). Under systemd they go to the journal: `journalctl -u xrpl-tail -f`, `journalctl -u xrpl-backfill -f`.
+- Set `LOG_FILE` for a rotating log file (`LOG_MAX_MB`, `LOG_BACKUPS`). Backfill worker processes send their log lines to the main process, so one command writes one file.
+- **Each command that runs at the same time needs its own `LOG_FILE`**, for example `logs/tail.log` and `logs/backfill.log`. Two processes must not rotate the same file (on Windows the file is locked).
+
+  ```bash
+  mkdir -p logs
+  nohup env LOG_FILE=logs/tail.log     python -m xrpl_ingest tail     >/dev/null 2>&1 &
+  nohup env LOG_FILE=logs/backfill.log python -m xrpl_ingest backfill >/dev/null 2>&1 &
+  ```
+
+- `deploy\windows\run.cmd` sets `LOG_FILE=logs\xrpl_ingest_<command>.log` by default (for example `logs\xrpl_ingest_tail.log`), unless `LOG_FILE` is already set.
+- Times are UTC, ISO 8601, ending with `Z` (e.g. `2026-10-18T09:15:02.123Z`).
+- At start the program logs its version and all resolved paths (base folder, `.env`, stop file, range file, log file, lock). Check them if a file "is not found".
 - Backfill progress lines look like:
 
   ```
@@ -997,62 +1044,76 @@ Backfill worker processes ignore Ctrl+C themselves; the main process tells them 
 ## Step 7: Run as a service
 
 A service starts the program at boot and restarts it after a crash. Use it at least for `tail`.
-The templates are in the `deploy/` folder. Each file has comments at the top: read them and change the paths and user name before installing.
-**UNVERIFIED:** none of the templates has been tested on a real machine yet.
+The templates are in `deploy/` (Linux: systemd; Windows: Task Scheduler). There is no service template for macOS: run the program there from a terminal.
+**UNVERIFIED: the templates are not tested on a real host** (only reviewed against the systemd / ScheduledTasks documentation).
 
 ### 7.1 Linux: systemd (`deploy/systemd/`)
 
+Two units:
+
+| Unit | Runs | Installed by setup | Start |
+|---|---|---|---|
+| `xrpl-tail.service` | `python -m xrpl_ingest tail` | yes, not enabled | `sudo systemctl enable --now xrpl-tail` (also starts at every boot) |
+| `xrpl-backfill.service` | `python -m xrpl_ingest backfill` (range from `backfill_range.txt`) | yes, not enabled | `sudo systemctl start xrpl-backfill` (by hand, one run) |
+
+`bash setup/setup_ubuntu.sh ingest` (and `setup_all.sh`) render both templates into `/etc/systemd/system/`: they replace `@REPO_DIR@` (the repo path) and `@USER@` (the normal user who ran the script with sudo) and run `daemon-reload`. They refuse to install the units as root, and refuse a repo path that contains `%`, `$`, `"`, `\` or a newline.
+
 ```bash
-ls deploy/systemd/                                         # see the unit files
-sudo cp deploy/systemd/xrpl-tail.service /etc/systemd/system/
-sudo systemctl edit --full xrpl-tail                       # set User=, paths, XRPL_INGEST_HOME
-sudo systemctl daemon-reload
+bash setup/setup_ubuntu.sh ingest
 sudo systemctl enable --now xrpl-tail
-systemctl status xrpl-tail
-journalctl -u xrpl-tail -f
+sudo systemctl start xrpl-backfill
+systemctl status xrpl-tail xrpl-backfill
+journalctl -u xrpl-tail -f          # or: journalctl -u xrpl-backfill -f
 ```
 
-- `systemctl stop xrpl-tail` sends SIGTERM = graceful stop.
-- The unit should not run as root. Use your normal user.
-- After a stop by stop file, the program exits normally, and systemd (with `Restart=on-failure`) does not restart it.
-- A config error (exit `2`) should not be retried in a loop (`RestartPreventExitStatus=2`).
-- `setup/setup_ubuntu.sh ingest` can also install the `xrpl-tail.service` for you.
-
-### 7.2 macOS: launchd (`deploy/launchd/`)
+Without the setup script, render a unit by hand (replace the path and user):
 
 ```bash
-ls deploy/launchd/
-cp deploy/launchd/<file>.plist ~/Library/LaunchAgents/      # edit paths inside first
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<file>.plist
-launchctl print gui/$(id -u)/<label>                       # status
-launchctl bootout gui/$(id -u)/<label>                     # stop (SIGTERM = graceful)
+sed -e 's|@REPO_DIR@|/opt/xrpl-ingest|g; s|@USER@|xrplops|g' deploy/systemd/xrpl-tail.service \
+  | sudo tee /etc/systemd/system/xrpl-tail.service >/dev/null
+sudo systemctl daemon-reload
 ```
 
-### 7.3 Windows: Task Scheduler (`deploy/windows/install-task.ps1`)
+What the units do:
 
-Open PowerShell **as Administrator** in the project folder:
+- `User=@USER@`, `WorkingDirectory=` and `XRPL_INGEST_HOME=` = the repo folder, so `.env`, `process_status.txt` and `backfill_range.txt` are read from the repo.
+- `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`; logs go to the journal.
+- `Restart=on-failure`, `RestartSec=10`. A clean exit (`0`, for example after `tail=0` in the stop file) is not restarted.
+- `RestartPreventExitStatus`: **tail `2 3 5`**, **backfill `1 2 3 5`**. A restart cannot fix a config error (2), a missing range on the node (3) or a second instance (5). For backfill, `1` also means "finished with recorded failed ledgers" or "stopped on request", so it is not restarted either: run `retry-failed` or start it again by hand. Crashes (`4`, `6`, signals) are restarted.
+- `systemctl stop` sends SIGTERM = graceful stop. `KillMode=control-group` sends it to the backfill workers too. `TimeoutStopSec=300`: after 5 minutes systemd kills the rest.
+- Graceful stop also works with the stop file: `backfill=0`, `tail=0` or `current_process=0` in the repo's `process_status.txt`.
+
+### 7.2 Windows: Task Scheduler (`deploy/windows/`)
+
+Files:
+
+| File | Purpose |
+|---|---|
+| `setup-windows.ps1` | `.venv` with Python 3.12, `pip install -r requirements.txt`, `.env` from `.env.example` (if missing), `doctor` (see Step 5). |
+| `install-task.ps1 -Command tail\|backfill [-Uninstall]` | Registers (or removes) the scheduled task `xrpl-ingest-tail` or `xrpl-ingest-backfill`. |
+| `run.cmd <command> [args]` | What the task runs: `.venv\Scripts\python.exe -m xrpl_ingest <command>`, with `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`, `XRPL_INGEST_HOME=<repo>` and `LOG_FILE=logs\xrpl_ingest_<command>.log` (each only if not already set). You can also run it by hand: `deploy\windows\run.cmd status`. |
+
+Register the tasks in an **elevated** PowerShell ("Run as administrator"), in the repo folder:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-Get-Help .\deploy\windows\install-task.ps1 -Detailed      # read the options
-.\deploy\windows\install-task.ps1
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Command tail
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Command backfill
+Start-ScheduledTask -TaskName xrpl-ingest-tail           # start now instead of at next boot
+Get-ScheduledTaskInfo -TaskName xrpl-ingest-tail         # LastTaskResult = the exit code
 ```
 
-To stop it gracefully, use the **stop file** (`tail=0` or `current_process=0`). Ending the task in Task Scheduler kills the process at once.
+Task settings: starts at system startup, runs as the user who registered it whether logged on or not (S4U logon: no password stored, no network shares), **runs on battery** (does not stop when going on battery), **no execution time limit** (`ExecutionTimeLimit 0`), restarts on failure every minute (tail up to 999 times, backfill 3 times), a second start while running is ignored.
 
-### 7.4 Docker Compose (MongoDB + this program)
+- **Graceful stop = the stop file** in the repo folder:
 
-`docker-compose.yml` runs **MongoDB and the ingest program** in containers. **xrpld is not in Docker:** there is no official XRPLF runtime image, and a full-history node needs direct access to its 39 TB disk. Run xrpld on the host (Steps 1 to 3).
+  ```powershell
+  Set-Content -Encoding ascii process_status.txt 'tail=0'     # or backfill=0 / current_process=0
+  ```
 
-```bash
-cp .env.example .env              # set MONGO_URI / SERVERS as explained in docker-compose.yml
-docker compose up -d              # MongoDB + tail
-docker compose logs -f
-docker compose --profile backfill up -d     # also start the backfill service
-docker compose stop               # SIGTERM = graceful stop
-```
-
-Reaching the node from a container: xrpld's admin websocket listens on `127.0.0.1` only, and a container's `127.0.0.1` is the container itself. Read the comments in `docker-compose.yml` for how it reaches the host's port 6006. Do not open port 6006 to the network to make this work.
+  `Stop-ScheduledTask` or "End" in the Task Scheduler window kills the process at once. Remove the stop line again before the next start.
+- The backfill task runs again at every boot (it resumes; finished chunks are skipped). When the backfill is done: `Disable-ScheduledTask -TaskName xrpl-ingest-backfill`.
+- Remove a task: `powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Command backfill -Uninstall` (stop it gracefully first; removing the task does not stop a running process).
+- Logs: `logs\xrpl_ingest_tail.log`, `logs\xrpl_ingest_backfill.log` in the repo.
 
 ---
 
@@ -1060,15 +1121,28 @@ Reaching the node from a container: xrpld's admin websocket listens on `127.0.0.
 
 ### The rule
 
-**Every piece of data the node sends is stored in MongoDB.**
+**Every piece of data the node sends is stored in MongoDB.** (Rule from `xrpl_ingest/transform.py`.)
 
-- **Mapped fields** keep their current names and formats (below). These never change.
-- **Every other key** of the ledger header and of each transaction is **also stored**, with its original name.
-- **Name collisions:** if a key from the node has the same name as a field the program sets itself, the program's field keeps its meaning, and the node's original value is stored under **`raw_<key>`**.
-- **Unsafe key names:** MongoDB field names should not contain `.` or start with `$`. Such keys are **escaped in a reversible way**, so the original name can be restored. (The exact escape format is defined in `xrpl_ingest/transform.py`.)
-- **Metadata:** the **complete** transaction metadata (`meta`, including `AffectedNodes`) is stored unchanged in the meta collection.
-- **Numbers** that the node sends as strings (for example `Fee`, `Sequence`, XRP amounts in drops) are stored as integers. A value too large for a 64-bit integer stays a string. No information is lost.
-- The ledger's `transactions` list is not repeated inside the ledger document. Each transaction is its own document, and its metadata is its own document.
+- **Mapped fields** keep their names and conversions (tables below). Existing queries keep working.
+- **Every other field** is stored as received, under its own name.
+- **Name collisions:** when that name is already used in the document by a **different** value, the received value is stored under **`raw_<key>`** (`raw_raw_<key>`, ... if that is taken too). An **identical value is not stored twice**.
+- **Fields the program computes** (for example `affected_accounts`, `delivered_amount`, `_inserted_at`): if the node sent a field with the same name, the node's value moves to `raw_<key>`.
+- `_id` is reserved: a node field can never become the MongoDB `_id` (it goes to `raw__id`).
+- **Key escaping:** MongoDB cannot store some field names, and the whole write would fail. Such keys are replaced by look-alike characters, in a reversible way (`unescape_key` in `transform.py` restores them):
+
+  | Original | Stored as |
+  |---|---|
+  | `.` anywhere in a key | `．` (U+FF0E, fullwidth full stop) |
+  | `$` at the start of a key | `＄` (U+FF04, fullwidth dollar sign) |
+  | NUL character | `␀` (U+2400) |
+
+- **Big integers:** a JSON integer larger than 64 bits (BSON cannot hold it) is stored as its exact decimal **string**.
+- **Number strings:** `Fee`, `Flags`, `DestinationTag`, `SourceTag`, `Sequence`, `LastLedgerSequence`, `OfferSequence`, `PreviousTxnLgrSeq` and XRP amounts in drops (`Amount`, `DeliverMax`, `TakerGets`, `TakerPays`) are converted to integers. A value that is not a number, or does not fit in 64 bits, is stored as received (the log has one WARNING per field per ledger).
+- **Ledger document:** every key of the ledger header **except `transactions`** (each transaction is its own document), plus every result-level key of the node's answer, including `validated` and node warnings (`warnings`; `node_warnings` if the answer already had different `warnings`).
+- **Metadata:** the **full** transaction metadata (`meta`, including `AffectedNodes`) is stored in the meta collection, with only the key escaping above applied.
+- Both answer shapes are handled: API v2 (`tx_json` + `meta`) and API v1 (flat transaction + `metaData`).
+
+**Existing documents do not get new fields by themselves.** Documents written by an older version of this program (or by the legacy scripts) keep their old shape until that ledger is ingested again. To refresh a range, re-ingest it: `verify --start N --end M --repair` repairs only problem ledgers; to rewrite everything in a range, remove its chunk documents and run `backfill` for it again (see [Checking that data is complete](#checking-that-data-is-complete)).
 
 ### Collections (default names)
 
@@ -1096,7 +1170,9 @@ Database: `xrpl_data_collection`. All names can be changed in `.env` (they match
 | `total_coins` | int | total XRP in drops |
 | `num_transactions` | int | number of transactions in this ledger |
 | `_inserted_at` | date | when this program wrote it |
-| all other header keys | as sent | for example `close_flags`, `close_time_resolution`, `parent_close_time` (whatever the node sends) |
+| `validated` | bool | from the node's answer (always `true`: unvalidated ledgers are refused) |
+| `warnings` / `node_warnings` | as sent | only when the node sent warnings |
+| all other header and answer keys | as sent | for example `close_flags`, `close_time_resolution`, `parent_close_time` (whatever the node sends) |
 
 ### Transaction document (`transactions`)
 
@@ -1113,17 +1189,18 @@ Database: `xrpl_data_collection`. All names can be changed in `.env` (they match
 | `transaction_index` | int | position inside the ledger |
 | `Fee`, `Flags`, `Sequence`, `DestinationTag`, `SourceTag`, `LastLedgerSequence`, `OfferSequence`, `PreviousTxnLgrSeq` | int | converted from strings |
 | `Amount`, `TakerGets`, `TakerPays` | int or object | XRP as int **drops** (1 XRP = 1,000,000 drops); tokens as object `{currency, issuer, value}`. This mix is the legacy format and is kept on purpose. |
-| `DeliverMax` | as sent | API v2 name of a Payment's `Amount` |
-| `delivered_amount` | int or object or string | from `meta.delivered_amount`: what **really** arrived. Same int/object format. The string `"unavailable"` is kept as is (old ledgers). |
-| `affected_accounts` | list of strings | sorted, unique list of every account touched by the transaction (from all `AffectedNodes` fields `Account`, `Destination`, `Owner`, `Issuer`, `HighLimit.issuer`, `LowLimit.issuer`, plus the tx `Account` and `Destination`) |
-| `amount_xrp` / `delivered_xrp` | Decimal128 | exact XRP value (XRP amounts only) |
-| `amount_currency` / `delivered_currency` | string | `"XRP"` or the token currency code |
+| `DeliverMax` | int or object | API v2 name of a Payment's `Amount`, converted like `Amount` |
+| `delivered_amount` | int or object or string | from `meta.delivered_amount` (else `meta.DeliveredAmount`): what **really** arrived. Same int/object format. The string `"unavailable"` (partial payments before 2014) is kept as is. Missing when the metadata has neither. |
+| `affected_accounts` | list of strings | sorted, unique list of every account address in the transaction's metadata: all `AffectedNodes` (`CreatedNode`, `ModifiedNode`, `DeletedNode`; in `FinalFields`, `NewFields`, `PreviousFields`: `Account`, `Destination`, `Owner`, `Issuer`, `HighLimit.issuer`, `LowLimit.issuer`), plus the tx `Account` and `Destination`. Only values that look like classic addresses (`r...`, 25-35 characters; no checksum test). |
+| `amount_xrp` / `delivered_xrp` | Decimal128 | exact XRP value (drops / 1,000,000), XRP amounts only |
+| `amount_currency` / `delivered_currency` | string | `"XRP"`, or the token's currency code |
 | `amount_issuer` / `delivered_issuer` | string | token issuer (tokens only) |
-| `amount_value` / `delivered_value` | Decimal128 | exact token value (tokens only) |
+| `amount_value` / `delivered_value` | Decimal128 | exact token value, parsed from the value string (tokens only; left out if the value is not a decimal number that Decimal128 can hold) |
 | `_inserted_at` | date | when this program wrote it |
 | all other transaction keys | as sent | every key of `tx_json` and of the outer transaction object |
 
-**About Payments in API v2:** the node no longer sends `Amount` for Payments, only `DeliverMax`. The program copies `DeliverMax` into `Amount` when `Amount` is missing, and keeps `DeliverMax` too.
+**About Payments in API v2:** the node no longer sends `Amount` for Payments, only `DeliverMax`. The program copies `DeliverMax` into `Amount` when `Amount` is missing, and keeps `DeliverMax` too. The readable `amount_*` fields are computed from `Amount`.
+Amounts that are neither drops nor a `{currency, issuer, value}` object get no readable fields (only the parts that exist are copied).
 `Amount` / `DeliverMax` is the **maximum** to deliver. With partial payments less can arrive. **For "how much was paid", use `delivered_amount`** ([xrpl.org: Partial Payments](https://xrpl.org/docs/concepts/payment-types/partial-payments)).
 
 The readable fields (`amount_*`, `delivered_*`) use Decimal128, never floating point, so values are exact.
@@ -1134,8 +1211,8 @@ The readable fields (`amount_*`, `delivered_*`) use Decimal128, never floating p
 |---|---|
 | `transaction_hash` | the transaction it belongs to |
 | `block_number`, `block_hash`, `close_time_iso` | its ledger |
-| `meta` | the **full** metadata object from the node, unchanged |
-| `memos` | the transaction's `Memos` list (empty list if none) |
+| `meta` | the **full** metadata object from the node (only key escaping applied) |
+| `memos` | the transaction's `Memos` list (empty list if none; key escaping applied) |
 | `_inserted_at` | when written |
 
 ### Progress and failure documents
@@ -1184,7 +1261,7 @@ Runbook:
 
    It prints `missing ledgers A-B` and `ledger N: expected X transactions, stored Y`, then `OK` or `<n> problem(s)`.
 
-2. **Repair them.** Fetches exactly the missing and mismatched ledgers again. Safe to repeat.
+2. **Repair them.** Fetches exactly the missing and mismatched ledgers again. Safe to repeat. Exit `0` if all is OK afterwards, `1` if problems remain.
 
    ```bash
    python -m xrpl_ingest verify --start 32570 --end 1000000 --repair
@@ -1205,7 +1282,7 @@ Runbook:
    python -m xrpl_ingest verify --start 32570 --end 1000000 --deep
    ```
 
-   It compares the stored transaction hashes of each ledger with the node's list, and checks that ledger N's `parent_hash` equals ledger N-1's `block_hash`.
+   It checks that ledger N's `parent_hash` equals ledger N-1's `block_hash` (offline), and compares the stored transaction hashes of each ledger with the node's list. Add `--repair` to re-ingest the ledgers whose hashes differ too.
 
 5. **Spot-check single transactions.**
 
@@ -1219,10 +1296,22 @@ Runbook:
    python -m xrpl_ingest fetch --ledger 12345678
    ```
 
-7. **Watch live ingest.** Run `health` every minute from your monitoring (cron, Nagios, ...). Exit `0` healthy, `1` lagging or stale, `4` unreachable.
+7. **Watch live ingest.** Run `health` every minute from your monitoring (cron, Nagios, ...). Exit `0` healthy, `1` lagging, stale or no checkpoint yet, `2` wrong network, `4` unreachable.
 
    ```bash
    python -m xrpl_ingest health --max-lag 50 --max-age 120
+   ```
+
+8. **Rewrite a whole range** (for example to add the new fields to documents written by an older version). Backfill skips chunks that are marked done, so remove the chunk marks of that range first, then backfill it again. Upserts replace the old documents.
+
+   ```javascript
+   // mongosh; example range 32570-1000000; chunk documents live in last_processed_block_no
+   use xrpl_data_collection
+   db.last_processed_block_no.deleteMany({ kind: "backfill_chunk", start: { $gte: 32570 }, end: { $lte: 1000000 } })
+   ```
+
+   ```bash
+   python -m xrpl_ingest backfill --start 32570 --end 1000000
    ```
 
 Suggestion: run `verify` over the whole stored range once a week, and always after a crash, disk problem or MongoDB restore.
@@ -1244,16 +1333,21 @@ Suggestion: run `verify` over the whole stored range once a week, and always aft
 | Many `slowDown` / `tooBusy` errors | The node is overloaded by too many parallel requests | They are retried automatically. Lower `NUM_PROCESSES` or `CONCURRENCY`. |
 | `message too big` / close code 1009 | A ledger is larger than `MAX_MESSAGE_MB` | Raise `MAX_MESSAGE_MB` (e.g. `128`), then `retry-failed`. |
 | Exit `5` "lock held" | The same command already runs | Stop the other one, or wait. A dead process frees the lock by itself. |
-| Program stops immediately after start | `process_status.txt` still says `current_process=0` (or `<command>=0`) | Delete the file or write `current_process=1`. |
-| Stop file seems ignored | Wrong folder (the base folder, not the current folder), or a line for another command comes first | Check the paths in the start log or `config`. |
-| `.env` not found / settings ignored | Started from another folder | `cd` to the project, or set `XRPL_INGEST_HOME` / `ENV_FILE`. |
+| Program stops immediately after start | `process_status.txt` still has a `current_process=0` or `<command>=0` line (any such line stops it) | Delete the file, or delete that line. |
+| Stop file seems ignored | Wrong folder (the base folder, not the current folder), or the key is for another command | Check the `stop file` path in the start log, `config` or `doctor`. |
+| `.env` not found / settings ignored | Started from another folder, or a process environment variable overrides `.env` | `cd` to the project, or set `XRPL_INGEST_HOME` / `ENV_FILE`. `config` shows the source of each value. |
+| `config error: set only one of MONGO_URI and MONGO_URI_FILE` | Both are set | Remove one of them. |
 | `.env` written by PowerShell looks wrong | Encoding (UTF-16) | Supported. If in doubt, save it in Notepad as "UTF-8". |
-| Windows: error with `NUM_PROCESSES` above 61 | Python on Windows allows at most 61 worker processes | Set `NUM_PROCESSES` to 61 or less. |
+| Windows: config error for `NUM_PROCESSES` above 61 | The Windows process pool allows at most 61 workers | Set `NUM_PROCESSES` to 61 or less. |
+| `tail` / `backfill` stop with exit `1` and a low-disk message | MongoDB's disk has less free space than `MIN_FREE_GB` | Add disk space (or lower `MIN_FREE_GB`), then start again. |
+| Two commands write a broken / missing log file (Windows) | Both use the same `LOG_FILE` | Give each command its own `LOG_FILE` (6.7). |
+| Windows task does not run / `LastTaskResult` not 0 | See `Get-ScheduledTaskInfo -TaskName xrpl-ingest-tail`; the value is the program's exit code | Run `deploy\windows\run.cmd doctor` by hand. |
 | PowerShell: "running scripts is disabled" | Execution policy | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` |
 | WSL cannot reach MongoDB on Windows | WSL uses its own network (NAT) | In `C:\Users\<you>\.wslconfig` add `[wsl2]` and `networkingMode=mirrored`, then `wsl --shutdown`. Or use the Windows host IP (`ip route \| awk '/default/ {print $3}'`) and set MongoDB `bindIp` plus a firewall rule. |
 | WSL: node very slow or disk full | Database on `/mnt/c` or ext4 VHDX limit | Use a native Linux server for full history. |
-| MongoDB `Authentication failed` | Wrong user/password, missing `authSource=admin`, or special characters not percent-encoded | See Step 4.6. |
-| `pymongo` errors with MongoDB 9.0 | 9.0 is not supported by the pinned driver | Use MongoDB 8.0. |
+| MongoDB `Authentication failed` (exit `2`) | Wrong user/password, missing `authSource=admin`, or special characters not percent-encoded | See Step 4.5. |
+| `doctor`: "MongoDB 9.x: supported are 7.0 and 8.0" | 9.0 is not supported by the pinned driver | Use MongoDB 8.0. |
+| `doctor`: pymongo / python-dotenv version warning | Old packages in the venv | `pip install -r requirements.txt` |
 
 Node problems in general: [Diagnosing Problems](https://xrpl.org/docs/infrastructure/troubleshooting/diagnosing-problems), [Server Won't Start](https://xrpl.org/docs/infrastructure/troubleshooting/server-wont-start), [Server Doesn't Sync](https://xrpl.org/docs/infrastructure/troubleshooting/server-doesnt-sync).
 
@@ -1286,6 +1380,11 @@ python -m xrpl_ingest doctor
 sudo systemctl start xrpl-tail
 ```
 
+If the unit templates in `deploy/systemd/` changed, re-run `bash setup/setup_ubuntu.sh ingest` to render them again (it keeps an existing `.env`).
+Windows: `deploy\windows\setup-windows.ps1` (keeps `.venv` and `.env`), then start the tasks again.
+
+New tx fields (for example `affected_accounts`, `amount_*`) appear only in documents written by the new version. Older documents get them when their ledgers are ingested again (see step 8 of [Checking that data is complete](#checking-that-data-is-complete)).
+
 ### Upgrade MongoDB
 
 Stay on 7.0 or 8.0. Do not move to 9.0 until `requirements.txt` allows a driver that supports it.
@@ -1315,12 +1414,12 @@ Be honest about what is tested. These points come from documentation or reasonin
 - Whether a mainnet node reports `network_id` without `[network_id]` in its config (source code says: only when configured).
 - How the node answers while syncing (`notSynced`, `notReady` errors) and whether those should be retried.
 - Port numbers, stanza names and default values of `xrpld.cfg` (taken from the 3.4.1 example config).
-- `setup/setup_ubuntu.sh` and `setup_all.sh` have never run on a real Ubuntu machine.
-- The service templates in `deploy/` (systemd, launchd, Windows Task Scheduler) and the Docker files are untested.
+- `setup/setup_ubuntu.sh`, `setup/common.sh` and `setup_all.sh` are not tested on a real host (only `bash -n` and shellcheck).
+- The service templates `deploy/systemd/xrpl-tail.service`, `deploy/systemd/xrpl-backfill.service` and the Windows scripts `deploy/windows/install-task.ps1`, `run.cmd`, `setup-windows.ps1` are **not tested on a real host** (Task Scheduler behaviour is UNVERIFIED).
 - SIGTERM graceful stop under real systemd.
 - Disk size of MongoDB for full history, and ingest speed (ledgers per second).
 - The full-history disk numbers (39 TB, 12 GB/day) are from xrpl.org (January 2026), not measured by us.
-- The MongoDB 8.0 commands for RHEL and Homebrew, and the Docker image tag (marked UNVERIFIED above).
+- The MongoDB 8.0 commands for RHEL and Homebrew (marked UNVERIFIED above).
 - Python package names on RHEL 9.
 - The WiredTiger cache example value.
 - WSL networking advice.
@@ -1353,7 +1452,6 @@ MongoDB:
 - Install on Red Hat (8.0): <https://www.mongodb.com/docs/v8.0/tutorial/install-mongodb-on-red-hat/>
 - Install on macOS: <https://www.mongodb.com/docs/manual/administration/install-community-macos/>
 - Install on Windows (also: not supported on WSL): <https://www.mongodb.com/docs/manual/administration/install-community-windows/>
-- Install with Docker: <https://www.mongodb.com/docs/manual/administration/install-community-docker/>
 - SCRAM authentication: <https://www.mongodb.com/docs/manual/tutorial/configure-scram-client-authentication/>
 - Connection strings: <https://www.mongodb.com/docs/manual/reference/connection-string/>
 - Production Notes (XFS, WiredTiger cache): <https://www.mongodb.com/docs/manual/administration/production-notes/>
