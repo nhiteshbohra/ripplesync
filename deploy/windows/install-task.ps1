@@ -101,7 +101,9 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount $restartCount `
     -RestartInterval (New-TimeSpan -Minutes 1) `
-    -MultipleInstances IgnoreNew
+    -MultipleInstances IgnoreNew `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries
 
 $description = "xrpl_ingest $Command (repo: $repo). Graceful stop: line '$Command=0' in process_status.txt. Installed by deploy\windows\install-task.ps1."
 Register-ScheduledTask -TaskName $taskName -Description $description -Action $action -Trigger $trigger `

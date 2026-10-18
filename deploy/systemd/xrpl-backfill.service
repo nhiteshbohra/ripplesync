@@ -30,7 +30,9 @@ Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
 ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest backfill
 Restart=on-failure
 RestartSec=10
-RestartPreventExitStatus=2 3 5
+# 1 = finished with failed ledgers or stopped on request (stop file / systemctl stop): restarting
+# would just loop. Use retry-failed / start again by hand. Crashes (4, 6, signals) still restart.
+RestartPreventExitStatus=1 2 3 5
 # SIGTERM = graceful stop; SIGKILL after TimeoutStopSec. control-group sends SIGTERM to the
 # pool workers too, not only to the main process.
 TimeoutStopSec=300

@@ -5,7 +5,7 @@ rem
 rem   deploy\windows\run.cmd tail | backfill | status | doctor | ...   (all args go to xrpl_ingest)
 rem
 rem Used by install-task.ps1 (Task Scheduler). Sets PYTHONUTF8=1, PYTHONUNBUFFERED=1,
-rem XRPL_INGEST_HOME=<repo> and LOG_FILE=logs\xrpl_ingest.log (each only if not already set
+rem XRPL_INGEST_HOME=<repo> and LOG_FILE=logs\xrpl_ingest_<command>.log (each only if not already set
 rem in the environment). Exit code = xrpl_ingest's.
 rem Graceful stop = the stop file, e.g. a line tail=0 in process_status.txt (Stop-ScheduledTask
 rem kills the process at once).
@@ -22,7 +22,8 @@ set "PY=%REPO%\.venv\Scripts\python.exe"
 if not exist "%PY%" goto :novenv
 
 if defined LOG_FILE goto :run
-set "LOG_FILE=logs\xrpl_ingest.log"
+rem one file per command: tail and backfill tasks must not rotate the same file (Windows locks it)
+set "LOG_FILE=logs\xrpl_ingest_%~1.log"
 if not exist "%XRPL_INGEST_HOME%\logs\" mkdir "%XRPL_INGEST_HOME%\logs"
 
 :run
