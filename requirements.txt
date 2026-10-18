@@ -1,5 +1,5 @@
 # Runtime
-pymongo>=4.8,<4.11        # cap: mongomock 4.3.0 (latest) breaks on pymongo>=4.11 (ReplaceOne passes sort=); known pymongo advisories (fixed in 4.18.2) do not affect our usage: no CSFLE/GridFS, operator-supplied URI
+pymongo>=4.9,<4.11        # >=4.9: full MongoDB 8.0 (and 7.0) support per the PyMongo compatibility table; <4.11 cap: mongomock 4.3.0 (latest) breaks on pymongo>=4.11 (ReplaceOne passes sort=); MongoDB 9.0 needs pymongo>=4.17 (partial; 4.18 full), so MongoDB 9.0 is unsupported for now; known pymongo advisories (fixed in 4.18.2) do not affect our usage: no CSFLE/GridFS, operator-supplied URI
 python-dotenv>=1.2.2,<2   # 1.2.2 fixes PYSEC-2026-2270
 websockets>=13,<18        # websockets.asyncio.client.connect(open_timeout=, max_size=) exists from 13.0
 # Tests

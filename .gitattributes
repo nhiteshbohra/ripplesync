@@ -1,4 +1,10 @@
-# Keep shell and Python sources LF everywhere (core.autocrlf=true on Windows would
-# otherwise check them out as CRLF, which breaks bash on Ubuntu).
+# Text files are stored and checked out with LF everywhere (core.autocrlf=true on Windows
+# would otherwise check them out as CRLF, which breaks bash, systemd units and Docker on Linux).
+# Binary files (incl. UTF-16 text, which contains NUL bytes) are detected and left alone.
+* text=auto eol=lf
 *.sh text eol=lf
 *.py text eol=lf
+# Windows-only scripts keep CRLF (cmd.exe mis-parses labels/gotos in LF batch files).
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

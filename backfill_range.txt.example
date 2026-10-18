@@ -1,0 +1,19 @@
+# Copy to backfill_range.txt (in the base dir: XRPL_INGEST_HOME, else next to .env).
+# `python -m xrpl_ingest backfill` reads it once at start when neither --start nor --end
+# is given; giving either flag ignores this file completely (--no-range-file also skips it).
+# The program never writes it. Missing file = the defaults below.
+#
+# Format: one "key = value" per line; blank lines and lines starting with # are ignored;
+# " #" starts an inline comment. Keys (case-insensitive): start, end -- nothing else.
+# An unknown or repeated key, or a line without "=", is a config error (exit 2) that
+# names the file and line. At most 4096 bytes; UTF-8 (BOM ok) or UTF-16 with BOM.
+#
+#   start : ledger number (underscores allowed, e.g. 1_000_000) or "first" (= 32570,
+#           the earliest mainnet ledger). Must be >= 32570. Default: 32570.
+#   end   : ledger number >= start, or "latest" (newest validated ledger). Default: latest.
+#
+# Tip: run `python -m xrpl_ingest tail` from day 1 alongside the backfill, so new ledgers
+# are stored while the history is still being filled in.
+
+start = 32570
+end   = latest      # or a ledger number

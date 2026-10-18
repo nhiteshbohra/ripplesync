@@ -10,9 +10,16 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Runtime output
+# Runtime output and local run-time inputs
 *.log
+logs/
+*.lock
 process_status.txt
+backfill_range.txt
+
+# Docker: local data dir and MongoDB credentials (docker/mongo.env.example is the template)
+/data/
+docker/mongo.env
 
 # Local virtual environments
 .venv/
