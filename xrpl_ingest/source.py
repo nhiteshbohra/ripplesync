@@ -227,6 +227,11 @@ class WsSource:
         if msg.get("status") == "error" or "error" in msg or result.get("status") == "error":
             err = msg.get("error") or result.get("error") or "unknown"
             raise RpcError(str(err), str(msg.get("error_message") or result.get("error_message") or ""))
+        if "warnings" in msg:  # message-level node warnings: keep them with the result
+            if "warnings" not in result:
+                result["warnings"] = msg["warnings"]
+            elif result["warnings"] != msg["warnings"]:
+                result["node_warnings"] = msg["warnings"]
         return result
 
     async def request(self, command: str, **params: Any) -> Dict[str, Any]:

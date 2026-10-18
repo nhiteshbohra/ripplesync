@@ -640,3 +640,63 @@ def test_concurrent_requests_share_one_connection():
 def test_no_servers_rejected():
     with pytest.raises(ValueError):
         WsSource([])
+
+
+# -- message-level `warnings` from the node are kept with the result ---------------------
+
+WARN = [{"id": 1004, "message": "This is a reporting server"}]
+
+
+def _with_warnings(result_warnings=None):
+    def handler(req):
+        if req["command"] == "server_info":
+            return info_reply(req)
+        result = {"validated": True, "ledger": {"ledger_index": str(req["ledger_index"])}}
+        if result_warnings is not None:
+            result["warnings"] = result_warnings
+        return {**ok(req, result), "warnings": WARN}
+    return handler
+
+
+def _get_ledger(handler):
+    connect, _ = single(handler)
+
+    async def go():
+        s = make_source(connect)
+        try:
+            return await s.get_ledger(5)
+        finally:
+            await s.close()
+    return run(go())
+
+
+def test_message_warnings_copied_into_result():
+    res = _get_ledger(_with_warnings())
+    assert res["warnings"] == WARN and "node_warnings" not in res  # old code: dropped
+
+
+def test_message_warnings_do_not_overwrite_different_result_warnings():
+    res = _get_ledger(_with_warnings(["result-level"]))
+    assert res["warnings"] == ["result-level"] and res["node_warnings"] == WARN
+
+
+def test_same_warnings_in_both_places_kept_once():
+    res = _get_ledger(_with_warnings(WARN))
+    assert res["warnings"] == WARN and "node_warnings" not in res
+
+
+def test_no_warnings_key_when_node_sends_none():
+    res = _get_ledger(default_handler)
+    assert "warnings" not in res and "node_warnings" not in res
+
+
+def test_node_warnings_end_up_in_the_ledger_doc():
+    from conftest import make_result
+    from xrpl_ingest.transform import parse_ledger_result
+
+    def handler(req):
+        if req["command"] == "server_info":
+            return info_reply(req)
+        return {**ok(req, make_result(req["ledger_index"])), "warnings": WARN}
+    ledger_doc, _, _ = parse_ledger_result(5, _get_ledger(handler))
+    assert ledger_doc["warnings"] == WARN
