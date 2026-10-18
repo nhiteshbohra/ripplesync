@@ -79,9 +79,10 @@ def v2_ledger_result():
                     "Sequence": 12, "TransactionType": "FutureThing",
                     "NewField.With.Dots": {"$inner": 1, "a.b": [1, {"$x": None}]},
                     "$dollar": "top", "Flags": 1, "status": "theirs",
-                    "BigCount": "1" * 30, "Ratio": 0.5, "Enabled": False},
+                    "BigCount": "1" * 30, "Ratio": 0.5, "Enabled": False,
+                    "HugeInt": 2**70},  # JSON allows it, BSON (int64) does not
         "meta": {"AffectedNodes": [], "TransactionIndex": 3, "TransactionResult": "tecNO_DST",
-                 "FutureMeta": {"k.e.y": "v"}},
+                 "FutureMeta": {"k.e.y": "v", "big": -(2**64)}},
     }
     return {
         "ledger": {
@@ -222,7 +223,7 @@ def test_keys_escaped_reversibly():
     doc = txs[3]
     assert doc["NewField．With．Dots"] == {"＄inner": 1, "a．b": [1, {"＄x": None}]}
     assert doc["＄dollar"] == "top"
-    assert metas[3]["meta"]["FutureMeta"] == {"k．e．y": "v"}
+    assert metas[3]["meta"]["FutureMeta"] == {"k．e．y": "v", "big": str(-(2**64))}
     for key in ("a.b", "$x", "$a.$b", "x\x00y", "plain", "mid$dle", ""):
         assert unescape_key(escape_key(key)) == key
 
@@ -301,3 +302,13 @@ def test_mongomock_accepts_escaped_docs():
 def test_to_int_never_makes_floats():
     for v in ("1.5", "1e3", "12", "-0", 10**30):
         assert not isinstance(to_int(v), float)
+
+
+def test_ints_beyond_int64_stored_as_exact_strings():
+    """BSON has no integer above int64: such a value made the whole ledger write fail."""
+    import bson
+    ledger_doc, txs, metas = parse_ledger_result(INDEX, v2_ledger_result(), NOW)
+    assert txs[3]["HugeInt"] == str(2**70)
+    assert metas[3]["meta"]["FutureMeta"]["big"] == "-18446744073709551616"
+    for doc in [ledger_doc, *txs, *metas]:
+        bson.encode(doc)  # raises OverflowError for an int that does not fit

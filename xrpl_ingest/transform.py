@@ -215,11 +215,14 @@ def unescape_key(key: str) -> str:
 
 
 def escape_keys(value: Any) -> Any:
-    """Deep copy of dicts/lists with every key escaped; other values unchanged."""
+    """Deep copy of dicts/lists, made storable: every key escaped, and an int beyond int64
+    (valid JSON, but BSON cannot hold it) as its exact decimal string. Else unchanged."""
     if isinstance(value, dict):
         return {escape_key(k): escape_keys(v) for k, v in value.items()}
     if isinstance(value, list):
         return [escape_keys(v) for v in value]
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) > INT64_MAX:
+        return str(value)
     return value
 
 
