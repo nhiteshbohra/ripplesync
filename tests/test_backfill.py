@@ -10,7 +10,8 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 from conftest import FAST_RETRY, FakeSource, FakeWs, make_result, no_sleep
-from xrpl_ingest import backfill, stopflag
+from xrpl_ingest import backfill
+from xrpl_ingest.support import runcontrol as stopflag
 from xrpl_ingest.backfill import (ChunkResult, discover_node, process_chunk, retry_failed,
                                   run_backfill)
 from xrpl_ingest.errors import IngestError, RequestTimeout, RpcError
@@ -449,7 +450,7 @@ def test_pool_low_disk_stops_like_the_stop_file(cfg, store, monkeypatch):
 
 
 def test_backfill_refuses_to_start_on_low_disk(cfg, store, monkeypatch):
-    from xrpl_ingest.diskspace import LowDiskSpace
+    from xrpl_ingest.support.monitor import LowDiskSpace
     monkeypatch.setattr(store, "db_stats", lambda: {"fsTotalSize": 10 * 1024 ** 3,
                                                     "fsUsedSize": 9.5 * 1024 ** 3}, raising=False)
     src = FakeSource(latest=POOL_HI, ranges=f"{POOL_LO}-{POOL_HI}")

@@ -6,9 +6,9 @@ import re
 
 import pytest
 
-from xrpl_ingest import logsetup
+from xrpl_ingest.support import logsetup
 from xrpl_ingest.errors import ConfigError
-from xrpl_ingest.logsetup import ChunkProgress, format_duration, setup_logging
+from xrpl_ingest.support.logsetup import ChunkProgress, format_duration, setup_logging
 
 UTC_Z = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"
 

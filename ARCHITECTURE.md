@@ -18,6 +18,10 @@ Modes:
 - **Stopping**: stop file `current_process=0` or SIGTERM (POSIX; handler in the CLI and in every pool worker) — in-flight work finishes, nothing new starts (`WsSource` also gives up between connect attempts: `StopRequested`, neither retried nor recorded as a ledger failure), stopped chunks stay unmarked, exit code as for the stop file. On Windows use the stop file. `.env` is read from the current directory (`find_dotenv(usecwd=True)`).
 - **verify**: gaps in ledger collection, and tx count ≠ `num_transactions`.
 
+## Package layout
+- `xrpl_ingest/` — the fetch path: `cli` (commands), `config` (settings + fixed XRPL constants), `errors`, `source` (node websocket), `transform` (node data → docs, lossless), `store` (MongoDB), `fetcher` (one ledger with retries), `backfill`, `tail`, `repair` (verify --repair/--deep, tx), `ledger_ranges`.
+- `xrpl_ingest/support/` — helpers around it: `files` (.env/base dir, BOM-safe text, backfill_range.txt), `runcontrol` (stop file, signals, one-instance lock), `monitor` (MIN_FREE_GB, `health`), `doctor` (`doctor`/`config`), `logsetup` (logging, progress/ETA). Nothing in `support/` is on the per-ledger hot path except the stop check and logging.
+
 ## Key components
 `WsSource` multiplexes requests by id over one socket, reconnects lazily (single lock), fails over across `SERVERS`, rejects servers whose `network_id` ≠ expected (absent ⇒ accepted, WARNING once per process; default 0 = mainnet; all servers wrong ⇒ `NetworkMismatch`, not retried), drops a socket only when nothing at all has arrived on it for `REQUEST_TIMEOUT` (a slow request just times out alone), logs why a socket died (websockets close code) and puts it in the `ConnectionLost` message; credentials in server URLs are redacted everywhere. Backoff (ledger retries and reconnects) is exponential with equal jitter, exponent capped (`MAX_BACKOFF_EXPONENT`). `errors.is_retryable` decides retry: `TransientError`, retryable `RpcError` codes, any `PyMongoError`. Everything else (e.g. `lgrNotFound`, `MalformedLedger`) fails fast into the failed collection.
 

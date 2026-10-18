@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from xrpl_ingest.errors import ConfigError
-from xrpl_ingest.rangefile import BackfillRange, choose, format_progress, load, parse, progress
+from xrpl_ingest.support.files import BackfillRange, choose_range as choose, format_range_progress as format_progress, load_range as load, parse_range as parse, range_progress as progress
 
 EXAMPLE = """# used by `backfill` when neither --start nor --end is given
 start = 32570
@@ -48,7 +48,7 @@ def test_invalid_names_file_and_line(text, msg):
 
 
 def test_load_missing_is_defaults_and_logged(tmp_path, caplog):
-    with caplog.at_level("INFO", logger="xrpl_ingest.rangefile"):
+    with caplog.at_level("INFO", logger="xrpl_ingest.support.files"):
         r = load(str(tmp_path / "none.txt"))
     assert r == BackfillRange() and "not found" in caplog.text
 

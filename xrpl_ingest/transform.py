@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from bson.decimal128 import Decimal128
 
-from .constants import INT64_MAX, RIPPLE_EPOCH_OFFSET
+from .config import INT64_MAX, RIPPLE_EPOCH_OFFSET
 from .errors import MalformedLedger, NotValidated
 
 log = logging.getLogger(__name__)

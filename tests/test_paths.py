@@ -4,9 +4,9 @@ import os
 
 import pytest
 
-from xrpl_ingest import paths
+from xrpl_ingest.support import files as paths
 from xrpl_ingest.errors import ConfigError
-from xrpl_ingest.textfile import TextFileError, decode, read_text
+from xrpl_ingest.support.files import TextFileError, decode, read_text
 
 BODY = "MONGO_URI=mongodb://127.0.0.1:1\nDB_NAME=synthetic\n"
 

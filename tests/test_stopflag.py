@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from xrpl_ingest import stopflag
-from xrpl_ingest.stopflag import stop_requested
+from xrpl_ingest.support import runcontrol as stopflag
+from xrpl_ingest.support.runcontrol import stop_requested
 
 
 # conftest's autouse fixture resets the stop flag and restores the SIGTERM handler.

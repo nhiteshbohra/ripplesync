@@ -4,7 +4,7 @@ import pytest
 from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
-from xrpl_ingest import stopflag
+from xrpl_ingest.support import runcontrol as stopflag
 from xrpl_ingest.backfill import run_backfill
 from xrpl_ingest.errors import ConnectFailed, RpcError, StopRequested
 from xrpl_ingest.fetcher import RetryPolicy

@@ -12,12 +12,13 @@ import mongomock
 import pytest
 from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 
-from xrpl_ingest import doctor, health
+from xrpl_ingest.support import doctor
+from xrpl_ingest.support import monitor as health
 from xrpl_ingest.config import Config
-from xrpl_ingest.doctor import Report, check_chunk_docs, check_indexes, run_doctor, satisfies
+from xrpl_ingest.support.doctor import Report, check_chunk_docs, check_indexes, run_doctor, satisfies
 from xrpl_ingest.errors import ConnectFailed
-from xrpl_ingest.lock import InstanceLock, lock_path
-from xrpl_ingest.paths import EnvFile
+from xrpl_ingest.support.runcontrol import InstanceLock, lock_path
+from xrpl_ingest.support.files import EnvFile
 from xrpl_ingest.store import LAST_LEDGER_ID, MongoStore
 
 GB = 1024 ** 3

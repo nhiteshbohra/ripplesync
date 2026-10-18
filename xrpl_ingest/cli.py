@@ -17,16 +17,17 @@ from typing import Any, Callable, Dict, List, Optional
 
 from pymongo.errors import ConfigurationError, PyMongoError
 
-from . import __version__, doctor, health, paths, rangefile
+from . import __version__
+from .support import doctor, files, monitor
 from .backfill import discover_node, retry_failed, retry_policy, run_backfill
 from .config import Config
-from .constants import FIRST_LEDGER
-from .diskspace import DiskGuard, LowDiskSpace
+from .config import FIRST_LEDGER
+from .support.monitor import DiskGuard, LowDiskSpace
 from .errors import ConfigError, IngestError, NetworkMismatch
-from .lock import InstanceLock, LockHeld, lock_path
-from .logsetup import setup_logging
+from .support.runcontrol import InstanceLock, LockHeld, lock_path
+from .support.logsetup import setup_logging
 from .source import WsSource
-from .stopflag import StopFlag, any_of, install_stop_signal, stop_requested
+from .support.runcontrol import StopFlag, any_of, install_stop_signal, stop_requested
 from .store import MongoStore
 from .tail import tail
 
@@ -103,9 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--json", action="store_true", help="machine-readable output")
 
     h = add("health", "is tail keeping up? 0 healthy, 1 lagging/stale, 4 unreachable")
-    h.add_argument("--max-lag", type=int, default=health.DEFAULT_MAX_LAG, metavar="N",
+    h.add_argument("--max-lag", type=int, default=monitor.DEFAULT_MAX_LAG, metavar="N",
                    help="ledgers the checkpoint may trail the node (default %(default)s)")
-    h.add_argument("--max-age", type=float, default=health.DEFAULT_MAX_AGE, metavar="S",
+    h.add_argument("--max-age", type=float, default=monitor.DEFAULT_MAX_AGE, metavar="S",
                    help="seconds since the checkpoint was last written (default %(default)s)")
 
     add("config", "print the effective configuration (redacted) and where each value came from")
@@ -125,7 +126,7 @@ class Run:
     command: str
     args: argparse.Namespace
     cfg: Optional[Config]
-    env: paths.EnvFile
+    env: files.EnvFile
     base_dir: str
     config_error: Optional[ConfigError] = None
     stop: Callable[[], bool] = _never  # replaced per run in _main
@@ -154,7 +155,7 @@ class Command:
 
 def _cmd_backfill(run: Run) -> int:
     a = run.args
-    rng = rangefile.choose(a.start, a.end, run.cfg.backfill_range_file,
+    rng = files.choose_range(a.start, a.end, run.cfg.backfill_range_file,
                            range_file=a.range_file, use_file=not a.no_range_file)
     log.info("backfill range %s", rng.describe())
     return backfill_exit_code(run_backfill(run.cfg, rng.start, rng.end, stop_check=run.stop))
@@ -201,7 +202,7 @@ def _cmd_doctor(run: Run) -> int:
 
 
 def _cmd_health(run: Run) -> int:
-    return asyncio.run(health.run_health(run.cfg, max_lag=run.args.max_lag,
+    return asyncio.run(monitor.run_health(run.cfg, max_lag=run.args.max_lag,
                                          max_age=run.args.max_age))
 
 
@@ -251,11 +252,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 def _main(args: argparse.Namespace, command: Command) -> int:
     try:
-        env = paths.load_env()
+        env = files.load_env()
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_CONFIG
-    base = paths.base_dir(os.environ, env)
+    base = files.base_dir(os.environ, env)
     cfg: Optional[Config] = None
     cfg_error: Optional[ConfigError] = None
     try:
@@ -399,7 +400,7 @@ async def _status(cfg: Config, store: MongoStore, stop=lambda: False) -> int:
 def _range_status(cfg: Config, store: Any, latest: Optional[int]) -> int:
     """Progress of the range-file range (what a plain `backfill` would do)."""
     try:
-        rng = rangefile.load(cfg.backfill_range_file)
+        rng = files.load_range(cfg.backfill_range_file)
     except ConfigError as e:
         print(f"backfill range: config error: {e}")
         return EXIT_CONFIG
@@ -410,8 +411,8 @@ def _range_status(cfg: Config, store: Any, latest: Optional[int]) -> int:
     if end < rng.start:
         print(f"backfill range {rng.describe()}: empty (end {end} < start {rng.start})")
         return 0
-    p = rangefile.progress(store, rng.start, end, cfg.chunk_size)
-    print(f"backfill range {rng.start}-{end} ({rng.source}): {rangefile.format_progress(p)}")
+    p = files.range_progress(store, rng.start, end, cfg.chunk_size)
+    print(f"backfill range {rng.start}-{end} ({rng.source}): {files.format_range_progress(p)}")
     return 0
 
 

@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from xrpl_ingest import stopflag  # noqa: E402
+from xrpl_ingest.support import runcontrol as stopflag  # noqa: E402
 from xrpl_ingest.config import Config  # noqa: E402
 from xrpl_ingest.errors import ConnectionLost  # noqa: E402
 from xrpl_ingest.fetcher import RetryPolicy  # noqa: E402

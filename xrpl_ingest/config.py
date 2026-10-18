@@ -8,9 +8,15 @@ import sys
 from dataclasses import dataclass, field, fields
 from typing import Mapping, Optional, Tuple
 
-from . import logsetup
+from .support import logsetup
 from .errors import ConfigError
-from .logsetup import LOG_FORMAT  # noqa: F401  (re-exported)
+from .support.logsetup import LOG_FORMAT  # noqa: F401  (re-exported)
+
+# Fixed XRPL facts (was constants.py)
+RIPPLE_EPOCH_OFFSET = 946684800  # seconds between Unix epoch and Ripple epoch (2000-01-01)
+FIRST_LEDGER = 32570  # earliest ledger in XRPL history
+INT64_MAX = 2**63 - 1
+MAX_BACKOFF_EXPONENT = 16  # caps base * 2**attempt; uncapped it overflows float after ~1024
 
 DEFAULT_SERVERS = ("ws://127.0.0.1:6006",)
 WINDOWS_MAX_PROCESSES = 61  # ProcessPoolExecutor refuses max_workers > 61 on Windows
@@ -199,8 +205,8 @@ def resolve_path(path: str, base: str) -> str:
 
 
 def _read_uri_file(path: str, errors: list) -> str:
-    """MONGO_URI from a file (e.g. a Docker/systemd secret): one line, BOM-tolerant."""
-    from .textfile import TextFileError, read_text
+    """MONGO_URI from a file (e.g. a systemd credential): one line, BOM-tolerant."""
+    from .support.files import TextFileError, read_text
     try:
         text = read_text(path, URI_FILE_MAX_BYTES)
     except (OSError, TextFileError) as e:

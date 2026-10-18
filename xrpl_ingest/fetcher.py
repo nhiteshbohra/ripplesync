@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from .constants import MAX_BACKOFF_EXPONENT
+from .config import MAX_BACKOFF_EXPONENT
 from .errors import StopRequested, is_retryable
 from .transform import parse_ledger_result
 

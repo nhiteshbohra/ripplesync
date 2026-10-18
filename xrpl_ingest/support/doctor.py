@@ -18,15 +18,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pymongo.errors import ExecutionTimeout, OperationFailure, PyMongoError
 
-from . import __version__
-from .config import ENV_VARS, WINDOWS_MAX_PROCESSES, Config, display_value, redact_mongo_uri
-from .diskspace import GB, local_free_bytes, mongo_free_bytes
-from .errors import IngestError, NetworkMismatch
-from .health import FAST_TIMEOUT_S, fast_source, fast_store
-from .lock import lock_path, probe
-from .paths import EnvFile, control_chars
-from .stopflag import COMMAND_KEYS
-from .store import CHUNK_KIND
+from .. import __version__
+from ..config import ENV_VARS, WINDOWS_MAX_PROCESSES, Config, display_value, redact_mongo_uri
+from .monitor import GB, local_free_bytes, mongo_free_bytes
+from ..errors import IngestError, NetworkMismatch
+from .monitor import FAST_TIMEOUT_S, fast_source, fast_store
+from .runcontrol import lock_path, probe
+from .files import EnvFile, control_chars
+from .runcontrol import COMMAND_KEYS
+from ..store import CHUNK_KIND
 
 # Keep in step with requirements.txt / pyproject.toml (a test checks pyproject).
 MIN_PYTHON = (3, 10)
@@ -285,7 +285,7 @@ def _key_list(keys: Any) -> List[Tuple[str, int]]:
 
 def wanted_indexes(cfg: Config) -> List[Tuple[str, List[Tuple[str, Any]], Dict[str, Any]]]:
     """(collection, key, options) for every index ensure_indexes creates."""
-    from .store import MongoStore
+    from ..store import MongoStore
     sink: List[Tuple[str, Any, Dict[str, Any]]] = []
     MongoStore(_Recorder(sink), cfg).ensure_indexes()
     return [(coll, _key_list(keys), opts) for coll, keys, opts in sink]

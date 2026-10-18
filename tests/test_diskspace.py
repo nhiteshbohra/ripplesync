@@ -1,7 +1,7 @@
 import pytest
 from pymongo.errors import AutoReconnect
 
-from xrpl_ingest.diskspace import GB, DiskGuard, LowDiskSpace, mongo_free_bytes
+from xrpl_ingest.support.monitor import GB, DiskGuard, LowDiskSpace, mongo_free_bytes
 
 
 class Stats:

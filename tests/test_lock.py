@@ -5,7 +5,7 @@ import textwrap
 
 import pytest
 
-from xrpl_ingest.lock import InstanceLock, LockHeld, lock_path, parse_info, probe, read_info
+from xrpl_ingest.support.runcontrol import InstanceLock, LockHeld, lock_path, parse_info, probe, read_info
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -38,7 +38,7 @@ def test_lock_held_by_another_process_and_freed_when_it_dies(tmp_path):
     code = textwrap.dedent(f"""
         import sys, time
         sys.path.insert(0, {ROOT!r})
-        from xrpl_ingest.lock import InstanceLock
+        from xrpl_ingest.support.runcontrol import InstanceLock
         InstanceLock({p!r}, "backfill").acquire()
         print("locked", flush=True)
         time.sleep(60)

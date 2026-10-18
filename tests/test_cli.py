@@ -5,10 +5,11 @@ import pytest
 from pymongo.errors import InvalidURI, ServerSelectionTimeoutError
 
 from conftest import FakeSource
-from xrpl_ingest import __version__, cli, stopflag
+from xrpl_ingest import __version__, cli
+from xrpl_ingest.support import runcontrol as stopflag
 from xrpl_ingest.cli import COMMANDS, _verify, backfill_exit_code, build_parser
 from xrpl_ingest.errors import ConnectFailed, NetworkMismatch
-from xrpl_ingest.lock import InstanceLock, lock_path
+from xrpl_ingest.support.runcontrol import InstanceLock, lock_path
 
 CLEAN = {"ledgers_failed": 0, "chunks_incomplete": 0, "unavailable_ranges": []}
 
@@ -212,7 +213,7 @@ def test_unexpected_exception_exits_6(cli_main, monkeypatch, capsys):
 
 
 def test_unexpected_exception_before_dispatch_exits_6(cli_main, monkeypatch, capsys):
-    monkeypatch.setattr(cli.paths, "load_env", raising(RuntimeError("weird")))
+    monkeypatch.setattr(cli.files, "load_env", raising(RuntimeError("weird")))
     assert cli_main(["status"]) == 6
     assert "internal error: RuntimeError: weird" in capsys.readouterr().err
 

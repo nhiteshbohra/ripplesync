@@ -18,7 +18,7 @@ from fake_xrpld import FakeXrpld, tx_count
 from xrpl_ingest.backfill import run_backfill
 from xrpl_ingest.cli import _verify, backfill_exit_code
 from xrpl_ingest.config import Config
-from xrpl_ingest.logsetup import setup_logging
+from xrpl_ingest.support.logsetup import setup_logging
 from xrpl_ingest.store import MongoStore
 
 pytestmark = pytest.mark.integration

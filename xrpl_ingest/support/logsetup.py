@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any, Callable, List, Optional
 
-from .errors import ConfigError
+from ..errors import ConfigError
 
 log = logging.getLogger(__name__)
 
