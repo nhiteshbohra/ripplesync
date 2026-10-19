@@ -7,8 +7,8 @@ It can copy the old history ("backfill") and follow new ledgers live ("tail").
 This README is the complete guide: hardware, install, configuration, running, services, data model and troubleshooting.
 Read the [Requirements](#requirements) first. Full history is very large (about 39 TB for the node alone).
 
-> **Status:** the code is tested with unit tests, a fake node and a local MongoDB.
-> It has **not yet run against a real xrpld node**. See [Not verified yet](#not-verified-yet).
+> **Status:** the code is tested with unit tests, a fake node and a local MongoDB, and a small trial ran on real mainnet data from public servers (Windows, 2026-10-19; see [Try it on a small computer first](#try-it-on-a-small-computer-first)).
+> It has **not yet run against your own xrpld node** or on a large range. See [Not verified yet](#not-verified-yet).
 > Text marked **UNVERIFIED** comes from documentation or reasoning, not from a test on real hardware.
 
 ## Table of contents
@@ -16,21 +16,22 @@ Read the [Requirements](#requirements) first. Full history is very large (about 
 1. [What it does](#what-it-does)
 2. [How it works](#how-it-works)
 3. [Quick start](#quick-start)
-4. [Requirements](#requirements)
-5. [Which operating system for what](#which-operating-system-for-what)
-6. [Step 1: Install the node (xrpld)](#step-1-install-the-node-xrpld)
-7. [Step 2: Configure the node for full history](#step-2-configure-the-node-for-full-history)
-8. [Step 3: Wait for the node and check it](#step-3-wait-for-the-node-and-check-it)
-9. [Step 4: Install MongoDB](#step-4-install-mongodb)
-10. [Step 5: Install this program](#step-5-install-this-program)
-11. [Step 6: Start ingesting](#step-6-start-ingesting)
-12. [Step 7: Run as a service](#step-7-run-as-a-service)
-13. [Data model: nothing is dropped](#data-model-nothing-is-dropped)
-14. [Checking that data is complete](#checking-that-data-is-complete)
-15. [Troubleshooting](#troubleshooting)
-16. [Upgrading and backups](#upgrading-and-backups)
-17. [Not verified yet](#not-verified-yet)
-18. [Official sources](#official-sources)
+4. [Try it on a small computer first](#try-it-on-a-small-computer-first)
+5. [Requirements](#requirements)
+6. [Which operating system for what](#which-operating-system-for-what)
+7. [Step 1: Install the node (xrpld)](#step-1-install-the-node-xrpld)
+8. [Step 2: Configure the node for full history](#step-2-configure-the-node-for-full-history)
+9. [Step 3: Wait for the node and check it](#step-3-wait-for-the-node-and-check-it)
+10. [Step 4: Install MongoDB](#step-4-install-mongodb)
+11. [Step 5: Install this program](#step-5-install-this-program)
+12. [Step 6: Start ingesting](#step-6-start-ingesting)
+13. [Step 7: Run as a service](#step-7-run-as-a-service)
+14. [Data model: nothing is dropped](#data-model-nothing-is-dropped)
+15. [Checking that data is complete](#checking-that-data-is-complete)
+16. [Troubleshooting](#troubleshooting)
+17. [Upgrading and backups](#upgrading-and-backups)
+18. [Not verified yet](#not-verified-yet)
+19. [Official sources](#official-sources)
 
 ---
 
@@ -88,6 +89,7 @@ Important ideas:
 ## Quick start
 
 For people who already know Linux, xrpld and MongoDB. Everyone else: follow Steps 1 to 7.
+Only want to try it on a laptop or desktop first? See [Try it on a small computer first](#try-it-on-a-small-computer-first).
 
 ```bash
 # 0. Get the code (or download a ZIP: see Step 5.2)
@@ -108,6 +110,139 @@ sudo systemctl enable --now xrpl-tail                      # live ledgers, from 
 sudo systemctl start xrpl-backfill                         # full history (resumable)
 python -m xrpl_ingest status                               # progress and ETA
 ```
+
+---
+
+## Try it on a small computer first
+
+You do not need a server, a node or 39 TB to see the program work. On a normal laptop or desktop (Windows, macOS or Linux) you can test it in three levels. Each level adds one thing. Stop at the level you need.
+
+| Level | What you need | What it proves | Time |
+|---|---|---|---|
+| **1. Tests only** | Python 3.10+ and the code | The code works on this computer: all commands, retries, stop, lock, lossless storage, against a fake node and an in-memory database | ~5 minutes |
+| **2. Tests + local MongoDB** | Level 1 + MongoDB installed on this computer | The whole backfill path end to end: real worker processes, real websockets (fake node), real MongoDB | +15 minutes |
+| **3. Real XRPL data, small amount** | Level 2 + internet | Real mainnet ledgers go into your MongoDB: `fetch`, `backfill`, `verify`, `tx`, `tail`, `status`, `health` | +15 minutes |
+
+What a small computer is enough for: Python 3.10 or newer, about 2 GB free disk, any normal RAM. MongoDB 8.0 on an x86_64 CPU needs AVX support (most CPUs from 2011 on).
+Do **not** run a full-history backfill this way. That needs the server in [Requirements](#requirements).
+
+### Level 1: tests only (no node, no MongoDB)
+
+Get the code and install it (details in [Step 5.2](#52-get-the-code) and [Step 5.3](#53-create-a-virtual-environment-and-install)):
+
+Linux / macOS / WSL:
+
+```bash
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+XRPL_INGEST_NO_INTEGRATION=1 python -m pytest -q
+```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
+py -3.12 -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # only if activation is blocked
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+$env:XRPL_INGEST_NO_INTEGRATION=1; python -m pytest -q
+```
+
+Good result: a last line like `634 passed, 9 skipped`. The exact numbers can change between versions; what matters is **0 failed**. Some tests are skipped on purpose on one operating system (for example Linux-only signal tests on Windows).
+
+### Level 2: add a local MongoDB
+
+1. Install MongoDB 8.0 on this computer: [Windows](#44-windows-msi-installer), [macOS](#43-macos-homebrew), [Ubuntu](#41-ubuntu-mongodb-80-apt). Keep the default: it listens on `127.0.0.1:27017` without a password. Do **not** expose it to the network.
+2. Run all tests, now including the end-to-end ones:
+
+```bash
+python -m pytest -q                  # all tests
+python -m pytest -q -m integration   # only the end-to-end tests
+```
+
+The end-to-end tests start a fake node on your computer, run a real backfill with worker processes into a **throwaway database** named `xrpl_ingest_test_<random>`, check it, and **delete that database** at the end. No other database is touched and your `.env` is not read.
+If they show as skipped, MongoDB is not reachable at `mongodb://127.0.0.1:27017` (is the service running?). They also expect MongoDB **without** a password; on a MongoDB with authentication switched on, use Level 1 instead.
+
+### Level 3: real XRPL data, a small amount
+
+A normal computer cannot hold a full-history node. For a small test you have two choices for the "node":
+
+- **A. A public mainnet server (easiest, any OS).** Public servers such as `wss://s2.ripple.com` and `wss://xrplcluster.com` have the full history and accept the same requests. They **rate-limit** clients, so use them only for a few hundred ledgers with low speed settings. This is a test only; for real ingestion use your own node (that is why this program exists).
+- **B. A small node of your own (Linux or WSL2 only).** xrpld in *pruned* mode keeps only recent ledgers, so it fits on a normal disk:
+  ```bash
+  HISTORY_MODE=pruned NODE_SIZE=small bash setup/setup_ubuntu.sh node
+  ```
+  Then wait until it is synced ([Step 3](#step-3-wait-for-the-node-and-check-it)). It only has the newest ledgers: use `status` to see its `complete_ledgers` and test `tail`, `fetch --ledger validated` and a `backfill` inside that range. **UNVERIFIED:** RAM and disk needs of a small pruned node were not measured; check [xrpl.org System Requirements](https://xrpl.org/docs/infrastructure/installation/system-requirements).
+
+**1. Make a separate settings file for the test.** Use `.env.test`, not `.env`, so your test settings never mix with server settings (`.env.test` is ignored by git). Put this in it (a separate database name `xrpl_trial`, one worker process, two requests at a time):
+
+```ini
+MONGO_URI=mongodb://127.0.0.1:27017
+DB_NAME=xrpl_trial
+# Choice A (public mainnet servers). Choice B: SERVERS=ws://127.0.0.1:6006
+SERVERS=wss://s2.ripple.com,wss://xrplcluster.com
+EXPECTED_NETWORK_ID=0
+NUM_PROCESSES=1
+CONCURRENCY=2
+CHUNK_SIZE=100
+```
+
+Never put testnet servers in `SERVERS` (they report another `network_id` and are refused anyway).
+
+**2. Tell the program to use that file** (in every new terminal window, inside the project folder, venv active):
+
+```bash
+export ENV_FILE=.env.test            # Linux / macOS / WSL
+```
+
+```powershell
+$env:ENV_FILE=".env.test"            # Windows PowerShell
+```
+
+**3. Run the commands:**
+
+```bash
+python -m xrpl_ingest config                                 # shows DB_NAME = xrpl_trial, SERVERS = ... [.env]
+python -m xrpl_ingest doctor                                 # no FAIL lines wanted; see the note below
+python -m xrpl_ingest fetch --ledger 32570                   # the first mainnet ledger
+python -m xrpl_ingest backfill --start 32570 --end 32769     # 200 old ledgers
+python -m xrpl_ingest verify --start 32570 --end 32769       # prints OK if nothing is missing
+python -m xrpl_ingest fetch --ledger validated               # the newest ledger (has transactions)
+python -m xrpl_ingest status                                 # counts and progress
+python -m xrpl_ingest tail                                   # live ledgers; stop with Ctrl+C (or a line tail=0 in process_status.txt)
+python -m xrpl_ingest health                                 # after tail: is it keeping up?
+```
+
+`doctor` on a test computer: `WARN node state ? (not synced yet)` is normal with public servers (they do not show their state); `node network` must say `network_id 0`. `INFO mongo auth not authenticated` is fine for a MongoDB that only listens on `127.0.0.1`. Any `WARN <package> installed; requires ...` means: run `pip install -r requirements.txt` again with the venv active.
+
+Look up one stored transaction against the node: take any `hash` from the `transactions` collection (MongoDB Compass, or `mongosh`) and run `python -m xrpl_ingest tx --hash <hash>`. It prints the stored copy, the node's copy, and `same` if they match.
+
+What we saw on a Windows laptop with choice A (2026-10-19): `fetch` stored ledger 32570; the 200-ledger `backfill` finished in about 70 seconds (about 3 ledgers per second at these low settings) with 0 failed; `verify` printed `OK`; the newest ledger had 43 transactions; `tx` printed `same`; `tail` followed new ledgers and stopped cleanly on `tail=0`; `health` reported `healthy` with a lag of 1 ledger.
+
+Note: `tail` starts after the highest ledger already stored. Backfill fills the history behind it; `tail` never goes back. `status` shows an ETA of hundreds of days at test speed: that is expected, the real speed comes from your own node and more workers.
+
+**4. Clean up.** Delete only the test database `xrpl_trial`.
+
+With `mongosh` (Linux / macOS / WSL):
+
+```bash
+mongosh --quiet --eval 'db.getSiblingDB("xrpl_trial").dropDatabase()'
+```
+
+On every OS, including Windows, with the venv active (no `mongosh` needed):
+
+```bash
+python -c "from pymongo import MongoClient; MongoClient('mongodb://127.0.0.1:27017').drop_database('xrpl_trial')"
+```
+
+Then `unset ENV_FILE` (PowerShell: `Remove-Item Env:ENV_FILE`), or close the terminal. You can also delete `process_status.txt` and `xrpl_ingest.*.lock` if they were created in the project folder.
+
+**5. Moving to the server.** Nothing from the test is copied. On the server follow Steps 1 to 7: your own node, a real `.env` (from `.env.example`), MongoDB with a password, and the normal speed settings.
 
 ---
 
@@ -1464,8 +1599,9 @@ Stay on 7.0 or 8.0. Do not move to 9.0 until `requirements.txt` allows a driver 
 
 Be honest about what is tested. These points come from documentation or reasoning, **not** from a run on real hardware:
 
-- The program has **never run against a real xrpld node**. Tests use a fake node (`tests/fake_xrpld.py`) and a local MongoDB.
-- The exact API v2 `ledger` answer shape (`tx_json` + `meta`, `DeliverMax`) is taken from xrpld 3.4.1 source and docs, not from a live node.
+- The program has **never run against its own xrpld node** (admin websocket on `127.0.0.1:6006`). Tests use a fake node (`tests/fake_xrpld.py`) and a local MongoDB.
+- Real data was tested only in a small trial (2026-10-19, Windows, public servers `wss://s2.ripple.com` / `wss://xrplcluster.com`): 200 early ledgers (32570-32769), about 15 recent ledgers with transactions (around ledger 107,758,500), `verify`, `tx`, `tail`, `health`. Large ranges, busy historical periods and long runs are not tested.
+- The API v2 `ledger` answer shape (`tx_json` + `meta`, `DeliverMax`) is taken from xrpld 3.4.1 source and docs; the trial above stored real answers without errors, but not every transaction type was checked by hand.
 - Whether a mainnet node reports `network_id` without `[network_id]` in its config (source code says: only when configured).
 - How the node answers while syncing (`notSynced`, `notReady` errors) and whether those should be retried.
 - Port numbers, stanza names and default values of `xrpld.cfg` (taken from the 3.4.1 example config).
