@@ -1,9 +1,9 @@
 # xrpl-tail.service -- live follow of new validated ledgers into MongoDB.
 # TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
 #
-# Installed by setup/setup_ubuntu.sh (ingest) and setup_all.sh, which replace the
+# Installed by install.sh (node / server setup), which replaces the
 # placeholders @REPO_DIR@ (absolute repo path) and @USER@ (the non-root user that owns the
-# repo) and write /etc/systemd/system/xrpl-tail.service (not enabled). Then:
+# repo) and writes /etc/systemd/system/xrpl-tail.service (not enabled). Then:
 #   sudo systemctl enable --now xrpl-tail
 # The repo path must not contain % $ " \ or newlines (systemd specifier/quoting rules).
 #

@@ -31,5 +31,5 @@ if not exist "%XRPL_INGEST_HOME%\logs\" mkdir "%XRPL_INGEST_HOME%\logs"
 exit /b %ERRORLEVEL%
 
 :novenv
-echo run.cmd: "%PY%" not found - run deploy\windows\setup-windows.ps1 first. 1>&2
+echo run.cmd: "%PY%" not found - run install.cmd in the repo folder first. 1>&2
 exit /b 2

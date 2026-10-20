@@ -1,22 +1,23 @@
 # XRPL ingest: full XRP Ledger history into MongoDB
 
 This program copies every ledger and every transaction of the XRP Ledger (XRPL) into MongoDB.
-It reads from **your own xrpld node**, not from public servers.
-It can copy the old history ("backfill") and follow new ledgers live ("tail").
+It reads from **your own xrpld node** (for a small test it can also read from public servers).
+It copies the old history ("backfill") and follows new ledgers live ("tail").
 
-This README is the complete guide: hardware, install, configuration, running, services, data model and troubleshooting.
-Read the [Requirements](#requirements) first. Full history is very large (about 39 TB for the node alone).
+**Start here:** [Choose how to set up](#choose-how-to-set-up). There is an **automatic** installer for Linux and for Windows, and every step is also written out for a **manual** setup.
 
-> **Status:** the code is tested with unit tests, a fake node and a local MongoDB, and a small trial ran on real mainnet data from public servers (Windows, 2026-10-19; see [Try it on a small computer first](#try-it-on-a-small-computer-first)).
-> It has **not yet run against your own xrpld node** or on a large range. See [Not verified yet](#not-verified-yet).
+> **Status:** the code is tested with unit tests, a fake node and a local MongoDB, and a small trial ran on real mainnet data from public servers (Windows, 2026-10-19; see [Manual test on a small computer](#manual-test-on-a-small-computer)).
+> It has **not yet run against your own xrpld node** or on a large range, and the installers are not yet tested on a real Ubuntu host. See [Not verified yet](#not-verified-yet).
 > Text marked **UNVERIFIED** comes from documentation or reasoning, not from a test on real hardware.
 
 ## Table of contents
 
-1. [What it does](#what-it-does)
-2. [How it works](#how-it-works)
-3. [Quick start](#quick-start)
-4. [Try it on a small computer first](#try-it-on-a-small-computer-first)
+**Setup**
+
+1. [Choose how to set up](#choose-how-to-set-up)
+2. [Automatic setup](#automatic-setup) ([Linux](#automatic-setup-linux-ubuntu--debian--wsl2), [Windows](#automatic-setup-windows-10--11))
+3. [Manual setup](#manual-setup)
+4. [Manual test on a small computer](#manual-test-on-a-small-computer)
 5. [Requirements](#requirements)
 6. [Which operating system for what](#which-operating-system-for-what)
 7. [Step 1: Install the node (xrpld)](#step-1-install-the-node-xrpld)
@@ -26,94 +27,172 @@ Read the [Requirements](#requirements) first. Full history is very large (about 
 11. [Step 5: Install this program](#step-5-install-this-program)
 12. [Step 6: Start ingesting](#step-6-start-ingesting)
 13. [Step 7: Run as a service](#step-7-run-as-a-service)
-14. [Data model: nothing is dropped](#data-model-nothing-is-dropped)
-15. [Checking that data is complete](#checking-that-data-is-complete)
-16. [Troubleshooting](#troubleshooting)
-17. [Upgrading and backups](#upgrading-and-backups)
-18. [Not verified yet](#not-verified-yet)
-19. [Official sources](#official-sources)
+
+**Reference**
+
+14. [What it does](#what-it-does)
+15. [How it works](#how-it-works)
+16. [Data model: nothing is dropped](#data-model-nothing-is-dropped)
+17. [Checking that data is complete](#checking-that-data-is-complete)
+18. [Troubleshooting](#troubleshooting)
+19. [Upgrading and backups](#upgrading-and-backups)
+20. [Not verified yet](#not-verified-yet)
+21. [Official sources](#official-sources)
 
 ---
 
-## What it does
+## Choose how to set up
 
-- **backfill**: copies old ledgers (from ledger 32570, the first ledger that exists on mainnet) into MongoDB. It works in chunks and can be stopped and restarted. Finished chunks are not fetched again.
-- **tail**: follows new validated ledgers as they appear, and stores a checkpoint so it can continue after a restart.
-- **verify / retry-failed / fetch**: find missing data and fetch it again.
-- **doctor / health / status / config**: check the setup and watch progress.
+First pick **what** you want to run, then **how** you want to install it.
 
-Every field the node sends is stored. Nothing is dropped. See [Data model](#data-model-nothing-is-dropped).
+**What:**
 
-Why a new program? The old scripts (no longer in this repository; still in its git history) used **public** XRPL servers.
-Public servers limit how many requests one client may send (rate limits). The old scripts lost data because of these limits.
-The problem was the public servers, not websockets. This program still uses websockets, but it talks to your own node as an **admin** client.
-xrpld does not rate-limit admin clients ([xrpl.org: Rate Limiting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting)).
+| Setup | What you get | What it needs |
+|---|---|---|
+| **test** | See the program work on a laptop or desktop. It reads a little real data from public XRPL servers. No node. | Any computer: Python and MongoDB (the installer adds both) |
+| **node** (Linux) | Your own small node that keeps only the newest ledgers (about 1 GB), and new ledgers stored live. | Linux, 16 GB RAM, 4 CPU cores, 50 GB SSD (xrpl.org minimum for testing) |
+| **server** (Linux) | The real thing: your own full-history node and the whole history in MongoDB. | Linux server, 64 GB RAM, 8+ cores, ~39 TB NVMe with XFS. See [Requirements](#requirements) |
+| **connect** (Windows) | This program on Windows, the node on a Linux machine. | A node you can reach from Windows |
 
-## How it works
+**How:**
 
-```
- XRPL peer-to-peer network
-          |
-          |  peer port 2459/tcp (older configs: 51235)
-          v
- +----------------------+
- | xrpld  (your node)   |   full history in NuDB (~39 TB, XFS disk)
- | same machine         |
- +----------------------+
-          |
-          |  local ADMIN websocket  ws://127.0.0.1:6006
-          |  JSON, API version 2, one "ledger" request per ledger
-          |  (transactions + metadata included)
-          v
- +----------------------+
- | xrpl_ingest          |   backfill: many processes, chunks of 1000 ledgers
- | (this program)       |   tail:     follows the newest validated ledger
- +----------------------+
-          |
-          |  pymongo, idempotent upserts
-          |  order: transactions -> metadata -> ledger document LAST
-          v
- +----------------------+
- | MongoDB 7.0 / 8.0    |   ledgers, transactions, metadata+memos,
- |                      |   failed ledgers, checkpoint + chunk progress
- +----------------------+
-```
+| Your system | Automatic (recommended) | Manual |
+|---|---|---|
+| Ubuntu 20.04+ / Debian 11+ (also WSL2) | `bash install.sh`: see [Automatic setup: Linux](#automatic-setup-linux-ubuntu--debian--wsl2) | [Manual setup](#manual-setup) |
+| Windows 10 / 11 | double-click `install.cmd`: see [Automatic setup: Windows](#automatic-setup-windows-10--11) | [Manual setup](#manual-setup) |
+| macOS, RHEL / Rocky / Alma | no installer | [Manual setup](#manual-setup) |
 
-Important ideas:
+Automatic and manual do the **same steps**. The installers first show what they found and what they will change, and ask before they change anything. You can run them again at any time; that is safe.
 
-- **One request per ledger.** The node returns the ledger header, all transactions and their metadata in one answer.
-- **Ledger document last.** The ledger document is written only after all its transactions. If it exists, the ledger is complete. A crash in the middle is repaired by running again.
-- **Upserts.** Writing the same ledger twice gives the same result. You can always re-run a command safely.
-- **Network guard.** The program refuses a server that reports another network (for example testnet). This stops testnet data from mixing with mainnet data, a bug of the old scripts.
+---
 
-## Quick start
+## Automatic setup
 
-For people who already know Linux, xrpld and MongoDB. Everyone else: follow Steps 1 to 7.
-Only want to try it on a laptop or desktop first? See [Try it on a small computer first](#try-it-on-a-small-computer-first).
+### Get the code
+
+Linux / WSL2:
 
 ```bash
-# 0. Get the code (or download a ZIP: see Step 5.2)
 git clone https://github.com/nhiteshbohra/ripplesync.git
 cd ripplesync
-# 1-2. Node: install xrpld, configure full history, start it (Ubuntu)
-DB_PATH=/data/xrpld/db/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
-# 3. Wait until server_state is "full"
-curl -s http://127.0.0.1:5005 -d '{"method":"server_info"}' | python3 -m json.tool | grep -E '"(server_state|complete_ledgers)"'
-# 4. MongoDB 8.0 (see Step 4), then this program (venv, .env, tests, systemd units):
-bash setup/setup_ubuntu.sh ingest
-source .venv/bin/activate
-python -m xrpl_ingest doctor                               # everything OK?
-python -m xrpl_ingest backfill --start 32570 --end 33569   # small trial (1000 ledgers)
-python -m xrpl_ingest verify   --start 32570 --end 33569
-cp backfill_range.txt.example backfill_range.txt           # full range: 32570 .. latest
-sudo systemctl enable --now xrpl-tail                      # live ledgers, from day 1
-sudo systemctl start xrpl-backfill                         # full history (resumable)
-python -m xrpl_ingest status                               # progress and ETA
 ```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/nhiteshbohra/ripplesync.git
+cd ripplesync
+```
+
+No git? Download the ZIP instead: [Step 5.2](#52-get-the-code).
+
+### Automatic setup: Linux (Ubuntu / Debian / WSL2)
+
+Run it as your **normal user**, not with `sudo`. It asks for your password when it needs it.
+
+```bash
+bash install.sh --check     # optional first: only look and report, changes nothing
+bash install.sh             # look, recommend, ask, install
+```
+
+What happens:
+
+1. **It looks at this computer** and prints a report: system, RAM, CPU cores, free disk, Python, MongoDB, the xrpld node (installed? running? synced?), and whether the node's validator settings are correct.
+2. **It recommends** `test`, `node` or `server` for this computer, and asks which one you want.
+3. **It shows the plan** (what it will install or change) and asks `Continue? [Y/n]`.
+4. **It does the work**, in this order:
+   - system packages (Python, venv, pip, curl);
+   - MongoDB 8.0 from the official MongoDB repository, if it is missing (not inside WSL2: there MongoDB runs on Windows);
+   - for `node` and `server`: xrpld from the official XRPLF repository (the signing key is checked), the node config (a backup is kept), the validator check (and repair, if you agree), then it starts xrpld and checks for 20 seconds that it keeps running;
+   - the Python environment `.venv` and its packages;
+   - the settings file `.env` (an existing `.env` is backed up and its MongoDB address is kept);
+   - the test suite and the `doctor` check.
+5. **It finishes**: `test` stores one real ledger as a final check; `node` and `server` install the services `xrpl-tail` and `xrpl-backfill` (not started yet). Then it prints the next commands.
+
+Options:
+
+| Command | What it does |
+|---|---|
+| `bash install.sh --check` | Only look and report. Changes nothing. |
+| `bash install.sh --mode test` | Test setup, without the question |
+| `bash install.sh --mode node` | Small node on this computer |
+| `bash install.sh --mode server` | Full-history server |
+| add `--yes` | Accept every default, no questions |
+
+You can also give settings in front of the command, for example `DB_PATH=/data/xrpld/db/nudb bash install.sh --mode server`:
+`MONGO_URI=...` (MongoDB to use), `DB_PATH=...` (folder for the node database; default `/var/lib/xrpld/db/nudb`), `NODE_SIZE=small|medium|huge` (default: chosen from the RAM), `FIXED_PEERS="host port;host port"` (peers with full history), `FORCE=1` (continue when a hardware check fails).
+
+If xrpld does not keep running, the installer prints the reason from xrpld's own log (`/var/log/xrpld/debug.log`) and checks the validator settings. See [Troubleshooting](#troubleshooting), fix it, and run the installer again.
+
+Before `--mode server`, prepare the big XFS disk ([Step 2.1](#21-prepare-the-big-disk-xfs)) and pass its folder as `DB_PATH`.
+
+### Automatic setup: Windows 10 / 11
+
+Windows cannot run the XRPL node itself (xrpl.org: Windows is for development only). On Windows the program runs as a **test** (public servers) or **connected** to your node on a Linux machine.
+
+1. Get the code (see above).
+2. Open the folder in Explorer and **double-click `install.cmd`**. (Or in PowerShell, in the folder: `.\install.cmd`.)
+
+What happens:
+
+1. **It looks at this computer**: Windows version, RAM, CPU, free disk, Python, MongoDB, and winget (the package manager built into Windows 10 / 11).
+2. **It asks**: `test` or `connect`. For `connect` it asks for the node's address.
+3. **It shows the plan** and asks `Continue? [Y/n]`.
+4. **It does the work**: Python 3.12 (with winget, if missing), MongoDB 8.0 (with winget, if missing; Windows asks for administrator rights; it runs as a Windows service), `.venv`, `.env`, the tests and `doctor`. `test` also stores one real ledger as a final check.
+5. **It prints the next commands.**
+
+Options (PowerShell, in the folder):
+
+| Command | What it does |
+|---|---|
+| `.\install.cmd -Check` | Only look and report |
+| `.\install.cmd -Mode test` | Test setup, without the question |
+| `.\install.cmd -Mode connect -NodeUrl ws://127.0.0.1:6006` | Use your own node |
+| add `-Yes` | Accept every default, no questions |
+
+**Connecting to a node on another machine.** The node's admin port (6006) only listens on that machine (`127.0.0.1`), on purpose. Reach it through an SSH tunnel; Windows 10 / 11 includes `ssh`. Keep this window open while the program runs:
+
+```powershell
+ssh -N -L 6006:127.0.0.1:6006 you@your-linux-server
+```
+
+Then use `-NodeUrl ws://127.0.0.1:6006`. A node in WSL2 with mirrored networking is also reachable as `ws://127.0.0.1:6006`. **UNVERIFIED:** both ways are not tested yet.
+
+### After the automatic setup
+
+Open a terminal in the project folder and activate the environment once per session:
+
+```bash
+source .venv/bin/activate          # Linux
+```
+
+```powershell
+.\.venv\Scripts\Activate.ps1          # Windows
+```
+
+Then use the commands in [Step 6](#step-6-start-ingesting) and, for a server, the services in [Step 7](#step-7-run-as-a-service).
+
+**From test to real use:** run the installer again with `--mode node` or `--mode server` (Windows: `-Mode connect`). It switches `.env` over and keeps a backup. The test database `xrpl_trial` stays; delete it as shown in [Manual test on a small computer](#manual-test-on-a-small-computer) (step 4).
+
+**Not done by the installers** (do these by hand when you need them): preparing the big XFS disk ([Step 2.1](#21-prepare-the-big-disk-xfs)), the firewall and router ([Step 2.3](#23-firewall)), a MongoDB password ([Step 4.5](#45-enable-authentication-password)), starting `tail` / `backfill` once the node is synced ([Step 6](#step-6-start-ingesting)).
 
 ---
 
-## Try it on a small computer first
+## Manual setup
+
+The same steps as the installers, by hand, with the reason for each step. Pick your path:
+
+| Goal | Follow |
+|---|---|
+| Test on a laptop or desktop (any OS) | [Manual test on a small computer](#manual-test-on-a-small-computer) |
+| Node or full-history server (Linux) | [Requirements](#requirements), [Which operating system](#which-operating-system-for-what), then [Step 1](#step-1-install-the-node-xrpld) to [Step 7](#step-7-run-as-a-service) in order |
+| Windows, connected to your node | [Step 4.4](#44-windows-msi-installer) (MongoDB), [Step 5](#step-5-install-this-program) (this program; set `SERVERS` to your node), [Step 6](#step-6-start-ingesting), [Step 7.2](#72-windows-task-scheduler-deploywindows) |
+
+---
+
+## Manual test on a small computer
+
+**Automatic instead:** `bash install.sh --mode test` (Linux) or `install.cmd -Mode test` (Windows) does all three levels for you.
 
 You do not need a server, a node or 39 TB to see the program work. On a normal laptop or desktop (Windows, macOS or Linux) you can test it in three levels. Each level adds one thing. Stop at the level you need.
 
@@ -173,11 +252,13 @@ If they show as skipped, MongoDB is not reachable at `mongodb://127.0.0.1:27017`
 A normal computer cannot hold a full-history node. For a small test you have two choices for the "node":
 
 - **A. A public mainnet server (easiest, any OS).** Public servers such as `wss://s2.ripple.com` and `wss://xrplcluster.com` have the full history and accept the same requests. They **rate-limit** clients, so use them only for a few hundred ledgers with low speed settings. This is a test only; for real ingestion use your own node (that is why this program exists).
-- **B. A small node of your own (Linux or WSL2 only).** xrpld in *pruned* mode keeps only recent ledgers, so it fits on a normal disk:
+- **B. A small node of your own (Linux or WSL2 only).** xrpld that keeps only recent ledgers (*pruned*) fits on a normal disk: about 1 GB for its database. xrpl.org asks for 16 GB RAM, 4 CPU cores and 50 GB SSD even for testing. Automatic: `bash install.sh --mode node`. By hand: install xrpld ([Step 1](#step-1-install-the-node-xrpld)), then set it to pruned with the same tool the installer uses (a backup is kept):
   ```bash
-  HISTORY_MODE=pruned NODE_SIZE=small bash setup/setup_ubuntu.sh node
+  sudo python3 setup/edit_cfg.py /etc/xrpld/xrpld.cfg --db-path /var/lib/xrpld/db/nudb --history pruned --node-size medium
+  sudo python3 setup/xrpld_check.py check        # validator settings correct?
+  sudo systemctl restart xrpld
   ```
-  Then wait until it is synced ([Step 3](#step-3-wait-for-the-node-and-check-it)). It only has the newest ledgers: use `status` to see its `complete_ledgers` and test `tail`, `fetch --ledger validated` and a `backfill` inside that range. **UNVERIFIED:** RAM and disk needs of a small pruned node were not measured; check [xrpl.org System Requirements](https://xrpl.org/docs/infrastructure/installation/system-requirements).
+  Then wait until it is synced ([Step 3](#step-3-wait-for-the-node-and-check-it)). It only has the newest ledgers: use `status` to see its `complete_ledgers` and test `tail`, `fetch --ledger validated` and a `backfill` inside that range.
 
 **1. Make a separate settings file for the test.** Use `.env.test`, not `.env`, so your test settings never mix with server settings (`.env.test` is ignored by git). Put this in it (a separate database name `xrpl_trial`, one worker process, two requests at a time):
 
@@ -242,7 +323,7 @@ python -c "from pymongo import MongoClient; MongoClient('mongodb://127.0.0.1:270
 
 Then `unset ENV_FILE` (PowerShell: `Remove-Item Env:ENV_FILE`), or close the terminal. You can also delete `process_status.txt` and `xrpl_ingest.*.lock` if they were created in the project folder.
 
-**5. Moving to the server.** Nothing from the test is copied. On the server follow Steps 1 to 7: your own node, a real `.env` (from `.env.example`), MongoDB with a password, and the normal speed settings.
+**5. Moving to the server.** Nothing from the test is copied. On the server run `bash install.sh --mode server`, or follow Steps 1 to 7: your own node, a real `.env` (from `.env.example`), MongoDB with a password, and the normal speed settings.
 
 ---
 
@@ -276,6 +357,8 @@ The number of ledgers is large: xrpl.org listed "81,000,000+" ledgers for full h
 | MongoDB | **7.0 or 8.0** | **Not 9.0.** Our pinned driver (`pymongo>=4.9,<4.11`) fully supports 7.0 and 8.0. MongoDB 9.0 needs pymongo 4.17 or newer (4.18 for full support) ([driver compatibility](https://www.mongodb.com/docs/drivers/compatibility/?driver-language=python&python-driver-framework=pymongo)). The cap `<4.11` exists because the test library `mongomock` breaks on newer pymongo. 7.0 ends support 2027-08-31, 8.0 ends 2029-10-31. **Use 8.0 for new installs.** `doctor` warns if the server is not 7.0 or 8.0. |
 | Python | **3.10 or newer** | 3.12 is the tested and recommended version. |
 | Python packages | from `requirements.txt` only | `pymongo`, `websockets`, `python-dotenv`, plus `pytest`, `mongomock` for tests. |
+
+---
 
 ## Which operating system for what
 
@@ -378,24 +461,19 @@ sudo systemctl enable xrpld.service
 sudo systemctl start xrpld.service
 ```
 
-### Option C: the setup script (Ubuntu)
+### Option C: automatic (Ubuntu / Debian)
 
-The script `setup/setup_ubuntu.sh` does Option A plus Step 2 for you (Ubuntu 20.04+ / Debian 11+, x86_64, glibc 2.31+). It makes a backup of the config first.
+`bash install.sh --mode server` (full history) or `--mode node` (recent ledgers only) does Option A, Step 2 and the rest for you. See [Automatic setup: Linux](#automatic-setup-linux-ubuntu--debian--wsl2).
+It installs xrpld from the XRPLF apt repository and **checks the key fingerprint itself** (it refuses a key that is not `B655416741221F780FBCFBC9AA84D41A11D29FA9`).
+
+To change only the node config, use the same tools by hand (a backup is kept; safe to repeat):
 
 ```bash
-bash setup/setup_ubuntu.sh check        # read-only preflight: OS, glibc, RAM, disk, filesystem. Changes nothing.
-DB_PATH=/data/xrpld/db/nudb HISTORY_MODE=full bash setup/setup_ubuntu.sh node
-# later (Step 5):  bash setup/setup_ubuntu.sh ingest      # or: all = node + ingest
+sudo python3 setup/edit_cfg.py /etc/xrpld/xrpld.cfg --db-path /data/xrpld/db/nudb --history full --node-size huge
+sudo python3 setup/xrpld_check.py check      # validator settings correct?
 ```
 
-What `node` does: installs xrpld from the XRPLF apt repo, **checks the key fingerprint itself** (it refuses a key that is not `B655416741221F780FBCFBC9AA84D41A11D29FA9`), edits `/etc/xrpld/xrpld.cfg` (backup first), starts xrpld and prints the firewall note.
-
-Useful variables: `DB_PATH` (NuDB folder on the big XFS disk; default `/var/lib/xrpld/db/nudb`), `HISTORY_MODE=full|pruned` (default `full`), `NODE_SIZE` (`tiny small medium large huge`; default `huge`), `FIXED_PEERS="host port;host port"`, `FORCE=1` (continue past failed checks).
-`DB_PATH` must be a dedicated folder. The script runs `chown -R` on it, so `setup/db_path_guard.sh` refuses system folders and anything under `/home`, `/root` or `/run/user` (the xrpld service cannot see those, because of `ProtectHome=true`).
-Shared helper code is in `setup/common.sh`.
-**UNVERIFIED:** the scripts are not tested on a real host yet (only `bash -n` and shellcheck).
-
-`setup_all.sh` (repo root) installs MongoDB 8.0 + xrpld + this program in one go. It defaults to a small **pruned** node (`HISTORY_MODE=pruned`, `NODE_SIZE=medium`) for testing; set `HISTORY_MODE=full` for this project. On WSL it skips MongoDB (not supported there) and prints how to use MongoDB on Windows. It overlaps with `setup/setup_ubuntu.sh`.
+`DB_PATH` must be a dedicated folder. The installer runs `chown -R` on it, so `setup/db_path_guard.sh` refuses system folders and anything under `/home`, `/root` or `/run/user` (the xrpld service cannot see those, because of `ProtectHome=true`).
 
 ### Files the package installs
 
@@ -523,6 +601,13 @@ sudo chown -R xrpld:xrpld /data/xrpld
    ```bash
    sudo rm -r /var/lib/xrpld/db/*        # only the OLD default location, and only if unused
    ```
+
+**Validator settings: leave them as the package installed them.** They are in `/etc/xrpld/validators.txt` (`[validators_file]` in `xrpld.cfg`). Do not copy validator keys into `xrpld.cfg` and do not type keys by hand: one wrong character makes xrpld stop a second after it starts. Check, and restore the official settings if needed (backups are kept):
+
+```bash
+sudo python3 setup/xrpld_check.py check
+sudo python3 setup/xrpld_check.py fix        # only if check reports a problem
+```
 
 ### 2.3 Firewall
 
@@ -704,7 +789,7 @@ brew services start mongodb-community@8.0
    Restart-Service MongoDB
    ```
 
-On Ubuntu, `setup_all.sh` does 4.1 for you (MongoDB 8.0; it prints the MongoDB key fingerprint but cannot pin it, because MongoDB publishes none to compare with).
+The installers do this step for you: `install.sh` does 4.1 (it prints the MongoDB key fingerprint but cannot pin it, because MongoDB publishes none to compare with); `install.cmd` does 4.4 with winget.
 
 ### 4.5 Enable authentication (password)
 
@@ -778,10 +863,10 @@ The program runs on Linux, macOS and Windows. It needs Python 3.10 or newer (3.1
 
 | OS | Command |
 |---|---|
-| Ubuntu / Debian | `sudo apt-get install -y python3 python3-venv python3-pip`. Ubuntu 24.04 ships 3.12 (`python3.12 python3.12-venv`). `setup/setup_ubuntu.sh ingest` uses `python3.12` when it is on PATH, else `python3` (must be 3.10+). |
+| Ubuntu / Debian | `sudo apt-get install -y python3 python3-venv python3-pip`. Ubuntu 24.04 ships 3.12 (`python3.12 python3.12-venv`). `install.sh` uses `python3.12` when it is on PATH, else `python3` (must be 3.10+). |
 | RHEL / Rocky / Alma 9 | `sudo dnf install -y python3.12 python3.12-pip` (**UNVERIFIED** package names; `python3` 3.9 of RHEL 9 is too old) |
 | macOS | `brew install python@3.12` |
-| Windows | The installer from [python.org](https://www.python.org/downloads/windows/) (keep "py launcher" ticked), or `winget install Python.Python.3.12`. `deploy\windows\setup-windows.ps1` needs `py -3.12`. |
+| Windows | The installer from [python.org](https://www.python.org/downloads/windows/) (keep "py launcher" ticked), or `winget install Python.Python.3.12`. `install.cmd` installs Python 3.12 with winget if it is missing. |
 
 Note: for Python 3.12 the last Windows/macOS installer from python.org is 3.12.10. Newer 3.12 releases are source only. Python 3.13 should also work (not tested).
 
@@ -857,13 +942,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Windows: the script `deploy\windows\setup-windows.ps1` does all of 5.3 and 5.4 (creates `.venv` with `py -3.12`, installs `requirements.txt`, copies `.env.example` to `.env` if missing, runs `doctor`). It does not install MongoDB or xrpld. **Not tested on a real host.**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\setup-windows.ps1
-```
-
-Or by hand, in Windows PowerShell:
+Windows: `install.cmd` does 5.3 and 5.4 for you (see [Automatic setup: Windows](#automatic-setup-windows-10--11)). By hand, in Windows PowerShell:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -886,7 +965,7 @@ pip install -r requirements.txt
 `requirements.txt` is the only install file. It contains the runtime and the test packages.
 There is no installable package and no short command: always run the program as `python -m xrpl_ingest ...` with the venv active (or with `.venv/bin/python`, `.venv\Scripts\python.exe`).
 
-On Ubuntu, `bash setup/setup_ubuntu.sh ingest` does 5.3 and 5.4 for you: venv, requirements, `.env` (chmod 600; it asks for `MONGO_URI` with hidden input), the tests, `doctor --mongo`, and the two systemd units (see [Step 7](#step-7-run-as-a-service)).
+On Ubuntu / Debian, `bash install.sh` does 5.3 and 5.4 for you: venv, requirements, `.env` (chmod 600; it asks for `MONGO_URI` with hidden input if no local MongoDB is found), the tests, `doctor`, and for `node` / `server` the two systemd units (see [Step 7](#step-7-run-as-a-service)).
 
 Optional: run the tests. Why: they prove the install works on this machine.
 
@@ -1244,17 +1323,16 @@ Two units:
 | `xrpl-tail.service` | `python -m xrpl_ingest tail` | yes, not enabled | `sudo systemctl enable --now xrpl-tail` (also starts at every boot) |
 | `xrpl-backfill.service` | `python -m xrpl_ingest backfill` (range from `backfill_range.txt`) | yes, not enabled | `sudo systemctl start xrpl-backfill` (by hand, one run) |
 
-`bash setup/setup_ubuntu.sh ingest` (and `setup_all.sh`) render both templates into `/etc/systemd/system/`: they replace `@REPO_DIR@` (the repo path) and `@USER@` (the normal user who ran the script with sudo) and run `daemon-reload`. They refuse to install the units as root, and refuse a repo path that contains `%`, `$`, `"`, `\` or a newline.
+`bash install.sh --mode node` (or `--mode server`) renders both templates into `/etc/systemd/system/`: it replaces `@REPO_DIR@` (the repo path) and `@USER@` (your user) and runs `daemon-reload`. It refuses to install the units as root, and refuses a repo path that contains `%`, `$`, `"`, `\` or a newline.
 
 ```bash
-bash setup/setup_ubuntu.sh ingest
 sudo systemctl enable --now xrpl-tail
 sudo systemctl start xrpl-backfill
 systemctl status xrpl-tail xrpl-backfill
 journalctl -u xrpl-tail -f          # or: journalctl -u xrpl-backfill -f
 ```
 
-Without the setup script, render a unit by hand (replace the path and user):
+Without the installer, render a unit by hand (replace the path and user):
 
 ```bash
 sed -e 's|@REPO_DIR@|/opt/xrpl-ingest|g; s|@USER@|xrplops|g' deploy/systemd/xrpl-tail.service \
@@ -1273,11 +1351,10 @@ What the units do:
 
 ### 7.2 Windows: Task Scheduler (`deploy/windows/`)
 
-Files:
+Files (the setup itself is `install.cmd` in the repo folder, see [Automatic setup: Windows](#automatic-setup-windows-10--11)):
 
 | File | Purpose |
 |---|---|
-| `setup-windows.ps1` | `.venv` with Python 3.12, `pip install -r requirements.txt`, `.env` from `.env.example` (if missing), `doctor` (see Step 5). |
 | `install-task.ps1 -Command tail\|backfill [-Uninstall]` | Registers (or removes) the scheduled task `xrpl-ingest-tail` or `xrpl-ingest-backfill`. |
 | `run.cmd <command> [args]` | What the task runs: `.venv\Scripts\python.exe -m xrpl_ingest <command>`, with `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`, `XRPL_INGEST_HOME=<repo>` and `LOG_FILE=logs\xrpl_ingest_<command>.log` (each only if not already set). You can also run it by hand: `deploy\windows\run.cmd status`. |
 
@@ -1302,6 +1379,61 @@ Task settings: starts at system startup, runs as the user who registered it whet
 - The backfill task runs again at every boot (it resumes; finished chunks are skipped). When the backfill is done: `Disable-ScheduledTask -TaskName xrpl-ingest-backfill`.
 - Remove a task: `powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Command backfill -Uninstall` (stop it gracefully first; removing the task does not stop a running process).
 - Logs: `logs\xrpl_ingest_tail.log`, `logs\xrpl_ingest_backfill.log` in the repo.
+
+---
+
+## What it does
+
+- **backfill**: copies old ledgers (from ledger 32570, the first ledger that exists on mainnet) into MongoDB. It works in chunks and can be stopped and restarted. Finished chunks are not fetched again.
+- **tail**: follows new validated ledgers as they appear, and stores a checkpoint so it can continue after a restart.
+- **verify / retry-failed / fetch**: find missing data and fetch it again.
+- **doctor / health / status / config**: check the setup and watch progress.
+
+Every field the node sends is stored. Nothing is dropped. See [Data model](#data-model-nothing-is-dropped).
+
+Why a new program? The old scripts (no longer in this repository; still in its git history) used **public** XRPL servers.
+Public servers limit how many requests one client may send (rate limits). The old scripts lost data because of these limits.
+The problem was the public servers, not websockets. This program still uses websockets, but it talks to your own node as an **admin** client.
+xrpld does not rate-limit admin clients ([xrpl.org: Rate Limiting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting)).
+
+---
+
+## How it works
+
+```
+ XRPL peer-to-peer network
+          |
+          |  peer port 2459/tcp (older configs: 51235)
+          v
+ +----------------------+
+ | xrpld  (your node)   |   full history in NuDB (~39 TB, XFS disk)
+ | same machine         |
+ +----------------------+
+          |
+          |  local ADMIN websocket  ws://127.0.0.1:6006
+          |  JSON, API version 2, one "ledger" request per ledger
+          |  (transactions + metadata included)
+          v
+ +----------------------+
+ | xrpl_ingest          |   backfill: many processes, chunks of 1000 ledgers
+ | (this program)       |   tail:     follows the newest validated ledger
+ +----------------------+
+          |
+          |  pymongo, idempotent upserts
+          |  order: transactions -> metadata -> ledger document LAST
+          v
+ +----------------------+
+ | MongoDB 7.0 / 8.0    |   ledgers, transactions, metadata+memos,
+ |                      |   failed ledgers, checkpoint + chunk progress
+ +----------------------+
+```
+
+Important ideas:
+
+- **One request per ledger.** The node returns the ledger header, all transactions and their metadata in one answer.
+- **Ledger document last.** The ledger document is written only after all its transactions. If it exists, the ledger is complete. A crash in the middle is repaired by running again.
+- **Upserts.** Writing the same ledger twice gives the same result. You can always re-run a command safely.
+- **Network guard.** The program refuses a server that reports another network (for example testnet). This stops testnet data from mixing with mainnet data, a bug of the old scripts.
 
 ---
 
@@ -1512,6 +1644,10 @@ Suggestion: run `verify` over the whole stored range once a week, and always aft
 
 | Problem | Cause | Fix |
 |---|---|---|
+| xrpld stops a second after it starts (`status=255/EXCEPTION`, last log line "Manifest counts", then "Start request repeated too quickly") | A config error, most often a wrong validator list key (typed by hand) or validator settings copied into `xrpld.cfg` | The real reason is only in xrpld's own log: `sudo tail -n 40 /var/log/xrpld/debug.log`. Check the validators: `sudo python3 setup/xrpld_check.py check`. Restore the official settings (backups kept): `sudo python3 setup/xrpld_check.py fix`, then `sudo systemctl reset-failed xrpld && sudo systemctl restart xrpld`. |
+| Installer: "run this script WITHOUT sudo" | Started as `sudo bash install.sh` | Run `bash install.sh`. It asks for sudo itself; as root, `.venv` and `.env` would belong to root. |
+| Installer stops at a hardware check (RAM, cores, disk) | This computer is below what that setup needs | Choose a smaller setup (`--mode test`), or `FORCE=1 bash install.sh ...` if you know what you are doing. |
+| Windows installer: `winget` not found | Old Windows without "App Installer" | Install "App Installer" from the Microsoft Store, or install Python 3.12 and MongoDB 8.0 by hand (Steps 4.4 and 5.1). |
 | Index error at start (`E11000 duplicate key`, index build fails) on an old database | The legacy database has duplicate hashes or different index options. `doctor` reports this. | Use a **fresh database**: set a new `DB_NAME` in `.env`. Keep the old one for reference. |
 | `ConnectFailed` / connection refused on `ws://127.0.0.1:6006` | Node not running, `[port_ws_admin_local]` missing, or not listed under `[server]` | `systemctl status xrpld`; check Step 2.2; `doctor --node`. |
 | `NetworkMismatch` (exit `2`) | The server reports another network (testnet?) | Fix `SERVERS`. Never use testnet servers. |
@@ -1570,8 +1706,8 @@ python -m xrpl_ingest doctor
 sudo systemctl start xrpl-tail
 ```
 
-If the unit templates in `deploy/systemd/` changed, re-run `bash setup/setup_ubuntu.sh ingest` to render them again (it keeps an existing `.env`).
-Windows: `deploy\windows\setup-windows.ps1` (keeps `.venv` and `.env`), then start the tasks again.
+If the unit templates in `deploy/systemd/` changed, run the installer again with your setup (`bash install.sh --mode node` or `--mode server`); it renders them again and keeps your `.env` (backup kept).
+Windows: run `install.cmd` again (it keeps `.venv` and the MongoDB address in `.env`), then start the tasks again.
 
 New tx fields (for example `affected_accounts`, `amount_*`) appear only in documents written by the new version. Older documents get them when their ledgers are ingested again (see step 8 of [Checking that data is complete](#checking-that-data-is-complete)).
 
@@ -1605,8 +1741,8 @@ Be honest about what is tested. These points come from documentation or reasonin
 - Whether a mainnet node reports `network_id` without `[network_id]` in its config (source code says: only when configured).
 - How the node answers while syncing (`notSynced`, `notReady` errors) and whether those should be retried.
 - Port numbers, stanza names and default values of `xrpld.cfg` (taken from the 3.4.1 example config).
-- `setup/setup_ubuntu.sh`, `setup/common.sh` and `setup_all.sh` are not tested on a real host (only `bash -n` and shellcheck).
-- The service templates `deploy/systemd/xrpl-tail.service`, `deploy/systemd/xrpl-backfill.service` and the Windows scripts `deploy/windows/install-task.ps1`, `run.cmd`, `setup-windows.ps1` are **not tested on a real host** (Task Scheduler behaviour is UNVERIFIED).
+- `install.sh` (with `setup/common.sh`) is not tested on a real Ubuntu host yet: checked with `bash -n`, shellcheck and a `--check` run. `install.ps1` / `install.cmd` are syntax-checked only, not yet run end to end. The tools they use (`setup/edit_cfg.py`, `setup/envfile.py`, `setup/xrpld_check.py`) have unit tests.
+- The service templates `deploy/systemd/xrpl-tail.service`, `deploy/systemd/xrpl-backfill.service` and the Windows scripts `deploy/windows/install-task.ps1` and `run.cmd` are **not tested on a real host** (Task Scheduler behaviour is UNVERIFIED).
 - SIGTERM graceful stop under real systemd.
 - Disk size of MongoDB for full history, and ingest speed (ledgers per second).
 - The full-history disk numbers (39 TB, 12 GB/day) are from xrpl.org (January 2026), not measured by us.

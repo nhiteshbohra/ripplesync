@@ -1,8 +1,8 @@
 # xrpl-backfill.service -- historical backfill (multi-process) into MongoDB.
 # TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
 #
-# Installed (NOT enabled) by setup/setup_ubuntu.sh (ingest) and setup_all.sh, which replace
-# the placeholders @REPO_DIR@ and @USER@ and write /etc/systemd/system/xrpl-backfill.service.
+# Installed (NOT enabled) by install.sh (node / server setup), which replaces
+# the placeholders @REPO_DIR@ and @USER@ and writes /etc/systemd/system/xrpl-backfill.service.
 # The range comes from backfill_range.txt in the repo (see backfill_range.txt.example);
 # without that file the whole history (32570 .. latest) is backfilled.
 #   sudo systemctl start xrpl-backfill        # run it in the background

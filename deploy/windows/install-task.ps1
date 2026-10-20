@@ -73,7 +73,7 @@ if ($Uninstall) {
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $repo '.venv\Scripts\python.exe'))) {
-    Write-Host "ERROR: $repo\.venv not found; run deploy\windows\setup-windows.ps1 first." -ForegroundColor Red
+    Write-Host "ERROR: $repo\.venv not found; run install.cmd in the repo folder first." -ForegroundColor Red
     exit 2
 }
 if (-not (Test-Path -LiteralPath $runCmd)) {

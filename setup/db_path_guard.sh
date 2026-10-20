@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# DB_PATH guards shared by setup_all.sh and setup/setup_ubuntu.sh (sourced, not run).
+# DB_PATH guards for install.sh (sourced, not run).
 # DB_PATH gets `chown -R xrpld:xrpld`, so a typo must not be able to re-own system files.
 # The caller defines die, need_ok and SUDO.
 

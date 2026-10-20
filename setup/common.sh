@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Helpers shared by setup_all.sh and setup/setup_ubuntu.sh (sourced, not run).
+# Helpers for install.sh (sourced, not run).
 # NOT TESTED ON A REAL HOST: only `bash -n` and shellcheck so far. Every fact about
 # packages, paths and ports below comes from the vendor docs cited next to it and is
 # still unverified against a real install.
@@ -136,17 +136,40 @@ remove_old_cfg_links() {
   done
 }
 
-# start_xrpld: enable + start the packaged unit, or print the manual command without systemd.
+# xrpld_failure_report: show why xrpld does not stay up. The journal only shows the exit code;
+# the reason is in xrpld's own log file (debug_logfile, /var/log/xrpld/debug.log by default).
+xrpld_failure_report() {
+  warn "xrpld does not stay running. Its last log lines:"
+  $SUDO journalctl -u xrpld.service -n 8 --no-pager 2>/dev/null || true
+  echo "---- /var/log/xrpld/debug.log (last 25 lines) ----"
+  $SUDO tail -n 25 /var/log/xrpld/debug.log 2>/dev/null || echo "(no debug.log)"
+  echo "---- validator settings check ----"
+  $SUDO python3 "$REPO_DIR/setup/xrpld_check.py" check --cfg "$XRPLD_CFG" || true
+}
+
+# start_xrpld: enable + start the packaged unit and make sure it keeps running (a bad config
+# makes it exit within seconds and systemd restarts it in a loop). Returns 1 if it does not stay up.
+# Without systemd: print the manual command.
 start_xrpld() {
-  if has_systemd; then
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable --now xrpld.service
-    sleep 5
-    systemctl --no-pager --lines=5 status xrpld.service || true
-  else
+  local restarts
+  if ! has_systemd; then
     warn "no systemd: xrpld was not started. Start it as the xrpld user (same command line as the packaged unit; not verified here):"
     echo "    $XRPLD_START_CMD"
+    return 0
   fi
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl reset-failed xrpld.service 2>/dev/null || true
+  $SUDO systemctl enable xrpld.service >/dev/null 2>&1 || true
+  $SUDO systemctl restart xrpld.service || true
+  say "Waiting 20 seconds to see that xrpld keeps running"
+  sleep 20
+  restarts="$(systemctl show -p NRestarts --value xrpld.service 2>/dev/null || echo 0)"
+  if systemctl is-active --quiet xrpld.service && [ "${restarts:-0}" = 0 ]; then
+    say "xrpld is running"
+    return 0
+  fi
+  xrpld_failure_report
+  return 1
 }
 
 firewall_note() {
