@@ -1741,7 +1741,7 @@ Be honest about what is tested. These points come from documentation or reasonin
 - Whether a mainnet node reports `network_id` without `[network_id]` in its config (source code says: only when configured).
 - How the node answers while syncing (`notSynced`, `notReady` errors) and whether those should be retried.
 - Port numbers, stanza names and default values of `xrpld.cfg` (taken from the 3.4.1 example config).
-- `install.sh` (with `setup/common.sh`) is not tested on a real Ubuntu host yet: checked with `bash -n`, shellcheck and a `--check` run. `install.ps1` / `install.cmd` are syntax-checked only, not yet run end to end. The tools they use (`setup/edit_cfg.py`, `setup/envfile.py`, `setup/xrpld_check.py`) have unit tests.
+- `install.sh` (with `setup/common.sh`) is not tested on a real Ubuntu host yet: checked with `bash -n`, shellcheck and a `--check` run. `install.ps1` ran end to end on Windows 11 (2026-10-20) in `test` mode (tests, `doctor`, one real ledger stored), again in `test` mode (nothing changed), and in `connect` mode (`.env` switched, backup kept); Python and MongoDB were already installed there, so the winget install path is not tested yet. The tools they use (`setup/edit_cfg.py`, `setup/envfile.py`, `setup/xrpld_check.py`) have unit tests.
 - The service templates `deploy/systemd/xrpl-tail.service`, `deploy/systemd/xrpl-backfill.service` and the Windows scripts `deploy/windows/install-task.ps1` and `run.cmd` are **not tested on a real host** (Task Scheduler behaviour is UNVERIFIED).
 - SIGTERM graceful stop under real systemd.
 - Disk size of MongoDB for full history, and ingest speed (ledgers per second).

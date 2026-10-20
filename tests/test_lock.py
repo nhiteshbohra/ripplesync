@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -36,25 +37,37 @@ def test_release_is_idempotent(tmp_path):
 def test_lock_held_by_another_process_and_freed_when_it_dies(tmp_path):
     p = lock_path(str(tmp_path), "backfill")
     code = textwrap.dedent(f"""
-        import sys, time
+        import os, sys, time
         sys.path.insert(0, {ROOT!r})
         from xrpl_ingest.support.runcontrol import InstanceLock
         InstanceLock({p!r}, "backfill").acquire()
-        print("locked", flush=True)
+        print("locked", os.getpid(), flush=True)
         time.sleep(60)
     """)
     child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
     try:
-        assert child.stdout.readline().strip() == "locked"
+        word, pid = child.stdout.readline().split()
+        assert word == "locked"
         with pytest.raises(LockHeld) as e:
             InstanceLock(p).acquire()
-        assert e.value.holder["pid"] == str(child.pid)
+        # The interpreter's own pid: in a Windows venv, child.pid is the venv launcher, which
+        # starts the real python.exe as its child.
+        assert e.value.holder["pid"] == pid
         assert probe(p)["held"] == "yes"
     finally:
         child.kill()  # like a crash: no cleanup code runs
         child.wait(30)
-    with InstanceLock(p):  # the OS released it
-        pass
+    # The OS releases the lock when the process is gone. In a Windows venv the real python.exe
+    # is ended a moment after its launcher, so allow a few seconds.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with InstanceLock(p):  # the OS released it
+                break
+        except LockHeld:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
     info = probe(p)
     assert info["held"] == "no" and info["pid"] == str(os.getpid())  # last holder: us
 
