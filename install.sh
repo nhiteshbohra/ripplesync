@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 # Automatic setup for Linux: Ubuntu 20.04+ / Debian 11+ on x86_64 (also inside WSL2).
 #
-# It looks at this computer (RAM, CPU, disk, Python, MongoDB, xrpld), recommends one of three
-# setups, installs what is missing, configures .env and checks that everything works.
-# Every change is shown first and needs a yes (or --yes). Run it as your normal user, not
-# with sudo: it asks for sudo itself when needed.
+# Two setups, both with your own xrpld node and the same program, settings and services:
+#   test    the server setup in small: a small node that keeps only recent ledgers (about 2 hours,
+#           ~1 GB), node_size small/medium. Shows that real data arrives: live tail, backfill,
+#           verify, retries, services and speed, before you build the big server.
+#   server  full history: ~39 TB XFS disk, 64 GB RAM, node_size huge. Months to sync.
+#
+# It looks at this computer (RAM, CPU, disk, Python, MongoDB, xrpld), recommends a setup,
+# shows what it will change and asks first (or --yes). Run it as your normal user, not with
+# sudo: it asks for sudo itself when needed. Running it again is safe.
 #
 #   bash install.sh                  # look, recommend, ask, install
 #   bash install.sh --check          # only look and report; changes nothing
-#   bash install.sh --mode test      # 1. test on this computer: public servers, no node (laptops)
-#   bash install.sh --mode node      # 2. small node on this computer (recent ledgers only; 16 GB+ RAM)
-#   bash install.sh --mode server    # 3. full-history server (~39 TB XFS disk, 64 GB RAM)
-#   bash install.sh --mode test --yes   # no questions, accept every default
+#   bash install.sh --mode test      # test setup without the question
+#   bash install.sh --mode server    # server setup without the question
+#   bash install.sh --trial          # test setup only: run the real-data checks again
+#   add --yes to accept every default without questions
 #
 # Settings you can pass in the environment:
 #   MONGO_URI=mongodb://...          MongoDB to use (default: the local one; asked if none is found)
 #   DB_PATH=/data/xrpld/nudb         where the node keeps its database        [/var/lib/xrpld/db/nudb]
-#   NODE_SIZE=small|medium|huge      xrpld [node_size]                        [chosen from the RAM]
+#   NODE_SIZE=small|medium|huge      xrpld [node_size]       [test: from the RAM; server: huge]
 #   FIXED_PEERS="host port;host port"  extra [ips_fixed] peers (full history)
+#   SYNC_WAIT_MIN=30                 test: minutes to wait for the node to sync before the checks
 #   FORCE=1                          continue past failed hardware checks
 #
 # NOT TESTED ON A REAL HOST yet: checked with bash -n and shellcheck. The manual steps are in
@@ -28,12 +34,16 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE=""
 YES=0
 CHECK_ONLY=0
+TRIAL_ONLY=0
 FORCE="${FORCE:-0}"
 DB_PATH="${DB_PATH:-/var/lib/xrpld/db/nudb}"
-PUBLIC_SERVERS="wss://s2.ripple.com,wss://xrplcluster.com"
+SYNC_WAIT_MIN="${SYNC_WAIT_MIN:-30}"
 LOCAL_MONGO="mongodb://127.0.0.1:27017"
+NODE_WS="ws://127.0.0.1:6006"
+TEST_DB="xrpl_test"
+SERVER_DB="xrpl_data_collection"
 
-usage() { sed -n '2,26p' "$0"; }
+usage() { sed -n '2,31p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,11 +51,12 @@ while [ $# -gt 0 ]; do
     --mode=*) MODE="${1#--mode=}"; shift ;;
     --yes|-y) YES=1; shift ;;
     --check) CHECK_ONLY=1; shift ;;
+    --trial) TRIAL_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
   esac
 done
-case "$MODE" in ""|test|node|server) ;; *) echo "--mode must be test, node or server" >&2; exit 2 ;; esac
+case "$MODE" in ""|test|server) ;; *) echo "--mode must be test or server" >&2; exit 2 ;; esac
 
 C_B='\033[1;34m'; C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_0='\033[0m'
 [ -t 1 ] || { C_B=''; C_G=''; C_Y=''; C_R=''; C_0=''; }
@@ -80,7 +91,8 @@ CFG="$XRPLD_CFG"
 # ------------------------------------------------------------------------------ 1. look
 port_open() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
 
-xrpld_state_json() {  # server_state and complete_ledgers from the local admin RPC port (5005 in the 3.4.1 cfg)
+# "server_state complete_ledgers" from the node's local admin RPC port (5005 in the 3.4.1 cfg); empty if no answer.
+xrpld_state() {
   python3 - <<'EOF' 2>/dev/null || true
 import json, urllib.request
 req = urllib.request.Request("http://127.0.0.1:5005", data=b'{"method":"server_info"}',
@@ -114,7 +126,7 @@ detect() {
     if [ "$SYSTEMD" = yes ] && systemctl is-active --quiet xrpld.service; then
       XRPLD="running"
       [ "$(systemctl show -p NRestarts --value xrpld.service 2>/dev/null || echo 0)" = 0 ] || XRPLD="crashing (keeps restarting)"
-      XRPLD_INFO="$(xrpld_state_json)"
+      XRPLD_INFO="$(xrpld_state)"
     elif [ "$SYSTEMD" = yes ] && systemctl is-failed --quiet xrpld.service; then
       XRPLD="failed (stopped after errors)"
     fi
@@ -128,9 +140,14 @@ detect() {
 }
 
 recommend() {
-  if [ "$RAM_GB" -ge 60 ] && [ "$FREE_GB" -ge 40000 ] && [ "$WSL" = no ]; then echo server
-  elif [ "$RAM_GB" -ge 15 ] && [ "$CORES" -ge 4 ] && [ "$FREE_GB" -ge 50 ]; then echo node
-  else echo test; fi
+  if [ "$RAM_GB" -ge 60 ] && [ "$FREE_GB" -ge 40000 ] && [ "$WSL" = no ]; then echo server; else echo test; fi
+}
+
+node_size_for() {  # node_size_for test|server
+  if [ -n "${NODE_SIZE:-}" ]; then echo "$NODE_SIZE"; return; fi
+  if [ "$1" = server ]; then echo huge
+  elif [ "$RAM_GB" -ge 15 ]; then echo medium
+  else echo small; fi
 }
 
 report() {
@@ -145,12 +162,13 @@ report() {
     printf '%s\n' "$VALIDATORS" | sed 's/^/    /'
   fi
   echo
-  echo "Setups"
-  echo "  1. test    Try it on this computer. No node: reads a little real data from public XRPL"
-  echo "             servers. Needs: Python, MongoDB (installed for you). Any laptop."
-  echo "  2. node    Small node on this computer (keeps only recent ledgers, about 1 GB)."
-  echo "             Needs: 16 GB RAM, 4 CPU cores, 50 GB SSD (xrpl.org minimum for testing)."
-  echo "  3. server  Full history. Needs: 64 GB RAM, 8+ cores, ~39 TB NVMe with XFS. Months to sync."
+  echo "Setups (both: your own node, MongoDB, this program, the same settings and services)"
+  echo "  test    The server setup in small. The node keeps only recent ledgers (~2 hours, ~1 GB),"
+  echo "          node_size $(node_size_for test). After setup it waits for the node and checks that real data"
+  echo "          arrives (tail, backfill, verify). Database: $TEST_DB."
+  echo "          Good: 16 GB RAM, 4 cores, 50 GB SSD (xrpl.org minimum for testing). 8 GB works, slower."
+  echo "  server  Full history: 64 GB RAM, 8+ cores, ~39 TB NVMe with XFS, node_size huge. Months to"
+  echo "          sync. Database: $SERVER_DB."
   echo "  Recommended for this computer: $(recommend)"
   echo
 }
@@ -182,34 +200,30 @@ step_mongodb() {
   fi
 }
 
-node_size_for_ram() {
-  if [ -n "${NODE_SIZE:-}" ]; then echo "$NODE_SIZE"; return; fi
-  if   [ "$RAM_GB" -ge 60 ]; then echo huge
-  elif [ "$RAM_GB" -ge 15 ]; then echo medium
-  else echo small; fi
-}
-
 step_node() {
-  local history="$1" size peers=() p parts=()
-  size="$(node_size_for_ram)"
-  say "xrpld node: history=$history, node_size=$size, database in $DB_PATH"
+  local mode="$1" history size peers=() p parts=()
+  if [ "$mode" = server ]; then history=full; else history=pruned; fi
+  size="$(node_size_for "$mode")"
+  say "xrpld node: $( [ "$mode" = server ] && echo 'full history' || echo 'recent ledgers only') (history=$history), node_size=$size, database in $DB_PATH"
   check_platform
-  if [ "$history" = full ]; then
-    [ "$RAM_GB" -ge 60 ] || need_ok "full history wants 64 GB RAM; this computer has ${RAM_GB} GB"
+  if [ "$mode" = server ]; then
+    [ "$RAM_GB" -ge 60 ] || need_ok "full history wants 64 GB RAM; this computer has ${RAM_GB} GB. Use --mode test on this computer"
   else
-    [ "$RAM_GB" -ge 15 ] || need_ok "a node needs 16 GB RAM (xrpl.org minimum for testing); this computer has ${RAM_GB} GB. Use --mode test instead"
-    [ "$CORES" -ge 4 ] || need_ok "a node needs 4+ CPU cores; this computer has $CORES"
+    [ "$RAM_GB" -ge 7 ] || need_ok "only ${RAM_GB} GB RAM: below 8 GB xrpld may not keep up with the network (xrpl.org: node_size tiny not recommended)"
+    [ "$RAM_GB" -ge 15 ] || warn "${RAM_GB} GB RAM: below the xrpl.org test minimum of 16 GB; node_size $size, the node may sync slowly or fall behind"
+    [ "$CORES" -ge 4 ] || warn "$CORES CPU cores: xrpl.org asks for 4+; the node may fall behind"
   fi
   check_db_path
   local probe="$DB_PATH" fs free_gb
   while [ ! -e "$probe" ]; do probe="$(dirname "$probe")"; done
   fs=$(stat -f -c %T "$probe"); free_gb=$(df -BG --output=avail "$probe" | tail -1 | tr -dc 0-9)
   echo "  database disk: $probe ($fs, ${free_gb} GB free)"
-  if [ "$history" = full ]; then
+  if [ "$mode" = server ]; then
     [ "$free_gb" -ge 45000 ] || need_ok "full history needs ~39 TB (+ growth); only ${free_gb} GB free"
     case "$fs" in ext*) need_ok "full history needs XFS or ZFS (NuDB files grow past ext4's 16 TB limit)" ;; esac
   else
-    [ "$free_gb" -ge 50 ] || need_ok "a node needs 50 GB free for its database; only ${free_gb} GB free"
+    [ "$free_gb" -ge 10 ] || need_ok "only ${free_gb} GB free for the node database; keep at least 10 GB free"
+    [ "$free_gb" -ge 50 ] || warn "${free_gb} GB free: xrpl.org asks for 50 GB for the node database"
   fi
   if [ "$WSL" = yes ]; then
     case "$probe" in /mnt/*) need_ok "DB_PATH is on a Windows drive (/mnt/...): far too slow for the node" ;; esac
@@ -220,7 +234,7 @@ step_node() {
   elif ask "Install xrpld (official XRPLF package; signing key checked)?" Y; then
     install_xrpld_pkg
   else
-    die "a node setup needs xrpld"
+    die "the $mode setup needs xrpld"
   fi
 
   [ "$SYSTEMD" = no ] || $SUDO systemctl stop xrpld.service 2>/dev/null || true
@@ -246,8 +260,9 @@ step_node() {
   if ! start_xrpld; then
     die "xrpld does not start; the lines above show why. Fix it, then run this script again (it is safe to repeat)."
   fi
-  [ "$history" = full ] && [ -z "${FIXED_PEERS:-}" ] && \
+  if [ "$mode" = server ] && [ -z "${FIXED_PEERS:-}" ]; then
     warn "full history: add peers that hold full history (FIXED_PEERS='host port'; see xrpl.org 'Configure Full History')"
+  fi
   firewall_note
 }
 
@@ -271,16 +286,15 @@ step_env() {
       while [ -z "$uri" ]; do read -rs -p "MongoDB address (MONGO_URI, input hidden; e.g. $LOCAL_MONGO): " uri; echo; done
     fi
   fi
-  local args=()
+  # Same settings for test and server (test is the server in small); only the database differs.
+  local args=("SERVERS=$NODE_WS" "CHUNK_SIZE=1000" "NUM_PROCESSES=$(( CORES < 4 ? CORES : 4 ))" "CONCURRENCY=16")
   [ -z "$uri" ] || args+=("MONGO_URI=$uri")
   db="$(env_get DB_NAME)"
-  case "$mode" in
-    test)
-      args+=("SERVERS=$PUBLIC_SERVERS" "DB_NAME=xrpl_trial" "NUM_PROCESSES=1" "CONCURRENCY=2" "CHUNK_SIZE=100") ;;
-    node|server)
-      args+=("SERVERS=ws://127.0.0.1:6006" "CHUNK_SIZE=1000" "NUM_PROCESSES=$(( CORES < 4 ? CORES : 4 ))" "CONCURRENCY=16")
-      [ "$db" != xrpl_trial ] || args+=("DB_NAME=xrpl_data_collection") ;;
-  esac
+  if [ "$mode" = test ]; then
+    args+=("DB_NAME=$TEST_DB")
+  else
+    case "$db" in "$TEST_DB"|xrpl_trial) args+=("DB_NAME=$SERVER_DB") ;; esac
+  fi
   say "Writing settings into .env ($mode setup)"
   env_set "${args[@]}"
 }
@@ -300,17 +314,54 @@ step_tests() {
 
 step_doctor() {
   say "Checking the setup (python -m xrpl_ingest doctor)"
-  if [ "$1" = test ]; then check_with_doctor "Setup"
-  else check_with_doctor "MongoDB" --mongo; check_with_doctor "Node" --node; fi
+  check_with_doctor "MongoDB" --mongo
+  check_with_doctor "Node" --node
 }
 
+# xi ARGS...: python -m xrpl_ingest ARGS from the repo (base dir = repo)
+xi() { (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 .venv/bin/python -m xrpl_ingest "$@"); }
+
+# wait_for_sync: until server_state is full/proposing/validating and complete_ledgers has a range.
+# Sets NODE_LEDGERS. Returns 1 after SYNC_WAIT_MIN minutes.
+wait_for_sync() {
+  local waited=0 info state
+  say "Waiting for the node to sync (up to $SYNC_WAIT_MIN minutes; a new node usually needs 5-20)"
+  while :; do
+    info="$(xrpld_state)"; state="${info%% *}"; NODE_LEDGERS="${info#* }"
+    case "$state" in
+      full|proposing|validating)
+        if printf '%s' "$NODE_LEDGERS" | grep -Eq '[0-9]+-[0-9]+'; then ok "node synced: state $state, ledgers $NODE_LEDGERS"; return 0; fi ;;
+    esac
+    [ "$waited" -lt $((SYNC_WAIT_MIN * 60)) ] || return 1
+    printf '   %3d min: node state %s, ledgers %s\n' $((waited / 60)) "${state:-no answer}" "${NODE_LEDGERS:-?}"
+    sleep 30; waited=$((waited + 30))
+  done
+}
+
+# step_trial: the checks that show real data arrives, the same commands as on the server.
 step_trial() {
-  say "Storing one real ledger to prove it works (python -m xrpl_ingest fetch --ledger validated)"
-  if (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 .venv/bin/python -m xrpl_ingest fetch --ledger validated); then
-    ok "a real XRPL ledger is now in MongoDB (database xrpl_trial)"
-  else
-    warn "fetch did not work (see above); check internet access and MongoDB, then: python -m xrpl_ingest doctor"
+  local last a b start end fails=0
+  say "Real-data checks (test setup)"
+  if ! wait_for_sync; then
+    warn "the node is not synced yet (state: ${NODE_LEDGERS:-?}). This is normal for a new node."
+    echo "     Run the checks later:  bash install.sh --trial"
+    return 0
   fi
+  last="$(printf '%s' "$NODE_LEDGERS" | grep -Eo '[0-9]+-[0-9]+' | tail -1)"
+  a="${last%-*}"; b="${last#*-}"
+  end=$((b - 2)); start=$((end - 199)); [ "$start" -ge "$a" ] || start="$a"
+  say "1/4 newest ledger:   fetch --ledger validated"
+  xi fetch --ledger validated || fails=$((fails + 1))
+  say "2/4 backfill:        200 recent ledgers ($start-$end) from your node"
+  xi backfill --start "$start" --end "$end" || fails=$((fails + 1))
+  say "3/4 verify:          the same range"
+  xi verify --start "$start" --end "$end" || fails=$((fails + 1))
+  say "4/4 live tail:       60 seconds, then a graceful stop"
+  (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 timeout -s INT 60 .venv/bin/python -m xrpl_ingest tail) || true
+  xi health || fails=$((fails + 1))
+  xi status || true
+  if [ "$fails" = 0 ]; then ok "real data arrives: newest ledger, backfill, verify and live tail all worked (database $TEST_DB)"
+  else warn "$fails check(s) failed (see above). python -m xrpl_ingest doctor shows more."; fi
 }
 
 finish() {
@@ -318,26 +369,37 @@ finish() {
   echo
   say "Done: $mode setup"
   echo "Start every session with:   cd \"$REPO_DIR\" && source .venv/bin/activate"
-  case "$mode" in
-    test) cat <<'EOF'
-Try:
-  python -m xrpl_ingest backfill --start 32570 --end 32769   # 200 old ledgers (about a minute)
-  python -m xrpl_ingest verify   --start 32570 --end 32769   # prints OK
-  python -m xrpl_ingest tail                                 # live ledgers; Ctrl+C stops
-  python -m xrpl_ingest status                               # what is stored
-This is a test setup (public servers, database xrpl_trial). For real use run this script on a
-server with --mode node or --mode server; it switches .env over (a backup is kept).
+  if [ "$mode" = test ]; then
+    cat <<EOF
+The test setup works like the server. Differences: the node keeps only recent ledgers (about
+2 hours), so backfill only ranges inside 'node complete_ledgers' (see: python -m xrpl_ingest status);
+the database is $TEST_DB.
+  python -m xrpl_ingest status                               # node ledgers, what is stored
+  python -m xrpl_ingest tail                                 # live ledgers; Ctrl+C stops gracefully
+  python -m xrpl_ingest backfill --start N --end M           # N..M inside the node's ledgers
+  python -m xrpl_ingest verify   --start N --end M
 EOF
-      ;;
-    *) print_next_steps "$units" ;;
-  esac
+    if [ "$units" = 1 ]; then
+      echo "  sudo systemctl enable --now xrpl-tail                      # the live service, as on the server"
+    fi
+    echo "For the real server: on the server machine run  bash install.sh --mode server"
+  else
+    print_next_steps "$units"
+  fi
 }
 
 # ------------------------------------------------------------------------------ main
 [ "$(uname -s)" = Linux ] || die "this installer is for Linux. Windows: run install.cmd. Others: see README.md 'Manual setup'"
 detect
-report
 
+if [ "$TRIAL_ONLY" = 1 ]; then
+  [ "$VENV_STATE" = exists ] && [ "$ENV_STATE" = exists ] || die "--trial needs a finished test setup (run: bash install.sh --mode test)"
+  [ "$(env_get DB_NAME)" = "$TEST_DB" ] || die "--trial runs only on the test setup (DB_NAME=$TEST_DB in .env), so it never writes into the server database"
+  step_trial
+  exit 0
+fi
+
+report
 if [ "$CHECK_ONLY" = 1 ]; then
   echo "(--check: nothing was changed)"
   exit 0
@@ -348,10 +410,10 @@ if [ -z "$MODE" ]; then
   if [ "$YES" = 1 ]; then MODE="$(recommend)"
   else
     def="$(recommend)"
-    read -r -p "Which setup? [test/node/server, Enter = $def] " MODE || MODE=""
+    read -r -p "Which setup? [test/server, Enter = $def] " MODE || MODE=""
     MODE="${MODE:-$def}"
-    case "$MODE" in 1) MODE="test" ;; 2) MODE="node" ;; 3) MODE="server" ;; esac
-    case "$MODE" in test|node|server) ;; *) die "please answer test, node or server" ;; esac
+    case "$MODE" in 1) MODE="test" ;; 2) MODE="server" ;; esac
+    case "$MODE" in test|server) ;; *) die "please answer test or server" ;; esac
   fi
 fi
 
@@ -359,30 +421,22 @@ echo
 echo "Plan for the '$MODE' setup:"
 echo "  - system packages: python3, python3-venv, pip, curl"
 case "$MONGO" in running*) ;; *) echo "  - MongoDB: $MONGO -> install / start it" ;; esac
-if [ "$MODE" != test ]; then
-  echo "  - xrpld node: $XRPLD -> install if needed, configure ($( [ "$MODE" = server ] && echo 'full history' || echo 'recent ledgers only')), check, start"
-fi
+echo "  - xrpld node: $XRPLD -> install if needed, configure ($( [ "$MODE" = server ] && echo 'full history' || echo 'recent ledgers only'), node_size $(node_size_for "$MODE")), check, start"
 echo "  - .venv with the Python packages from requirements.txt"
-echo "  - .env settings for this setup (existing .env: backup kept, MONGO_URI kept)"
+echo "  - .env settings (database $( [ "$MODE" = server ] && echo "$SERVER_DB" || echo "$TEST_DB"); existing .env: backup kept, MONGO_URI kept)"
 echo "  - run the tests and the doctor check"
-[ "$MODE" = test ] && echo "  - store one real ledger as a final check"
-[ "$MODE" = test ] || echo "  - install the services xrpl-tail / xrpl-backfill (not started)"
+echo "  - install the services xrpl-tail / xrpl-backfill (not started)"
+[ "$MODE" = server ] || echo "  - wait for the node, then check that real data arrives (tail, backfill, verify)"
 ask "Continue?" Y || { echo "Nothing changed."; exit 0; }
 
 step_base_packages
 step_mongodb
-case "$MODE" in
-  node)   step_node pruned ;;
-  server) step_node full ;;
-esac
+step_node "$MODE"
 step_python
 step_env "$MODE"
 step_tests
-step_doctor "$MODE"
+step_doctor
 UNITS=0
-if [ "$MODE" = test ]; then
-  step_trial
-else
-  install_ingest_units "${SUDO_USER:-$(id -un)}" && UNITS=1 || true
-fi
+install_ingest_units "${SUDO_USER:-$(id -un)}" && UNITS=1 || true
+[ "$MODE" = server ] || step_trial
 finish "$MODE" "$UNITS"

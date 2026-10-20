@@ -219,11 +219,11 @@ $envArgs = @((Join-Path $repo 'setup\envfile.py'), $envPath, '--example', (Join-
 $hasUri = (Invoke-Native $venvPy @((Join-Path $repo 'setup\envfile.py'), $envPath, '--has', 'MONGO_URI')) -eq 0
 if (-not $hasUri) { $envArgs += "MONGO_URI=$localMongo" }
 if ($Mode -eq 'test') {
-    $envArgs += @("SERVERS=$publicServers", 'DB_NAME=xrpl_trial', 'NUM_PROCESSES=1', 'CONCURRENCY=2', 'CHUNK_SIZE=100')
+    $envArgs += @("SERVERS=$publicServers", 'DB_NAME=xrpl_test', 'NUM_PROCESSES=1', 'CONCURRENCY=2', 'CHUNK_SIZE=100')
 } else {
     $envArgs += @("SERVERS=$NodeUrl", 'CHUNK_SIZE=1000', "NUM_PROCESSES=$([math]::Min($cores, 4))", 'CONCURRENCY=16')
     $db = Get-NativeOutput $venvPy @('-c', "from dotenv import dotenv_values as d; print(d(r'$envPath').get('DB_NAME') or '')")
-    if ($db -eq 'xrpl_trial') { $envArgs += 'DB_NAME=xrpl_data_collection' }
+    if ($db -eq 'xrpl_test' -or $db -eq 'xrpl_trial') { $envArgs += 'DB_NAME=xrpl_data_collection' }
 }
 Say "Writing settings into .env ($Mode setup)"
 $rc = Invoke-Native $venvPy $envArgs
@@ -257,7 +257,7 @@ switch ($rc) {
 if ($Mode -eq 'test') {
     Say 'Storing one real ledger to prove it works (fetch --ledger validated)'
     $rc = Invoke-Native $venvPy @('-m', 'xrpl_ingest', 'fetch', '--ledger', 'validated')
-    if ($rc -eq 0) { Ok 'a real XRPL ledger is now in MongoDB (database xrpl_trial)' }
+    if ($rc -eq 0) { Ok 'a real XRPL ledger is now in MongoDB (database xrpl_test)' }
     else { Warn 'fetch did not work (see above); check internet access and MongoDB.' }
 }
 
@@ -272,7 +272,7 @@ if ($Mode -eq 'test') {
     Write-Host '  python -m xrpl_ingest verify   --start 32570 --end 32769   # prints OK'
     Write-Host '  python -m xrpl_ingest tail                                 # live ledgers; Ctrl+C stops'
     Write-Host '  python -m xrpl_ingest status                               # what is stored'
-    Write-Host 'This is a test setup (public servers, database xrpl_trial). For real use, set up a node on'
+    Write-Host 'This is a test setup (public servers, database xrpl_test). For real use, set up a node on'
     Write-Host 'Linux (install.sh) and run this script again with -Mode connect.'
 } else {
     Write-Host 'Next:'
