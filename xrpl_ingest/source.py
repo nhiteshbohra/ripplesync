@@ -56,6 +56,19 @@ def _forget(conn: _Conn, rid: int, fut: asyncio.Future) -> None:
         fut.exception()
 
 
+def _server_info(result: Dict[str, Any]) -> Dict[str, Any]:
+    info = result.get("info", {})
+    if not isinstance(info, dict):
+        raise TransientError("node returned malformed server_info.info (expected object)")
+    validated = info.get("validated_ledger", {})
+    if not isinstance(validated, dict):
+        raise TransientError("node returned malformed server_info.validated_ledger (expected object)")
+    seq = validated.get("seq")
+    if seq is not None and (type(seq) is not int or seq < 0):
+        raise TransientError("node returned malformed validated ledger sequence")
+    return info
+
+
 class WsSource:
     def __init__(self, servers: Sequence[str], *, request_timeout: float = 30,
                  connect_retries: int = 5, backoff_base: float = 1.0, backoff_max: float = 30.0,
@@ -116,6 +129,11 @@ class WsSource:
                     await self._check_network(conn)
                     log.info("connected to %s", redact_url(url))
                     return conn
+                except asyncio.CancelledError:
+                    # _get_conn has not published this connection yet, so close() cannot
+                    # find it if cancellation interrupts the initial network check.
+                    await self._drop(conn)
+                    raise
                 except NetworkMismatch as e:
                     last = e
                     mismatched += 1
@@ -180,7 +198,7 @@ class WsSource:
     async def _check_network(self, conn: _Conn) -> None:
         if self.expected_network_id is None:
             return
-        info = (await self._request_on(conn, "server_info")).get("info", {})
+        info = _server_info(await self._request_on(conn, "server_info"))
         reported = info.get("network_id")
         global _warned_no_network_id
         if reported is None and not _warned_no_network_id:
@@ -199,20 +217,34 @@ class WsSource:
         conn.pending[rid] = fut
         payload = {"id": rid, "command": command, "api_version": API_VERSION, **params}
         seen = conn.received
-        try:
+        sent = False
+
+        async def exchange():
+            nonlocal sent
             await conn.ws.send(json.dumps(payload))
-            msg = await asyncio.wait_for(fut, timeout=self.request_timeout)
+            sent = True
+            return await fut
+
+        try:
+            msg = await asyncio.wait_for(exchange(), timeout=self.request_timeout)
         except asyncio.TimeoutError:
             conn.pending.pop(rid, None)
             # Nothing at all arrived during this request's whole timeout: the socket is hung.
             # Decided by message count, not by measuring durations: asyncio fires timers up
             # to one clock tick early (15.6 ms on Windows), so 'silent >= timeout' could miss.
-            if conn.received == seen:
+            if not sent:
+                log.warning("send to %s timed out; dropping connection", conn.url)
+                await self._drop(conn, f"connection to {conn.url} dropped: send timed out")
+            elif conn.received == seen:
                 silent = time.monotonic() - conn.last_rx
                 log.warning("no message from %s for %.1fs; dropping connection", conn.url, silent)
                 await self._drop(conn, f"connection to {conn.url} dropped: silent for {silent:.1f}s")
             # else: the connection is alive, only this request is slow; the others keep going
             raise RequestTimeout(f"{command} timed out after {self.request_timeout}s") from None
+        except asyncio.CancelledError:
+            if not sent:
+                await self._drop(conn, f"connection to {conn.url} dropped: send cancelled")
+            raise
         except TransientError:
             raise
         except Exception as e:  # noqa: BLE001 - send on a closed socket etc.
@@ -244,7 +276,7 @@ class WsSource:
         return await self.request("ledger", ledger_index=index, transactions=True, expand=True)
 
     async def server_info(self) -> Dict[str, Any]:
-        return (await self.request("server_info")).get("info", {})
+        return _server_info(await self.request("server_info"))
 
     async def latest_validated(self) -> int:
         seq = (await self.server_info()).get("validated_ledger", {}).get("seq")

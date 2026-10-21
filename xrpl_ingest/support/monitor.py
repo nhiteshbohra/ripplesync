@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import shutil
 import time
 from datetime import datetime, timezone
@@ -23,9 +24,9 @@ from typing import Any, Callable, Optional, Tuple
 from pymongo.errors import PyMongoError
 
 from ..config import Config
-from ..errors import IngestError, NetworkMismatch
+from ..errors import ConfigError, IngestError, NetworkMismatch
 from ..source import WsSource
-from ..store import LAST_LEDGER_ID, MongoStore
+from ..store import LAST_LEDGER_ID, MongoStore, checkpoint_index
 from .logsetup import format_duration
 
 log = logging.getLogger(__name__)
@@ -154,10 +155,7 @@ def read_checkpoint(store: Any) -> Tuple[int, Optional[datetime]]:
     """(index, updated_at) of the tail checkpoint; (0, None) if there is none. A legacy
     string index is read as a number."""
     doc = store.meta.find_one({"_id": LAST_LEDGER_ID}) or {}
-    try:
-        index = int(doc.get("index") or 0)
-    except (TypeError, ValueError):
-        index = 0
+    index = checkpoint_index(doc)
     return index, _utc(doc.get("updated_at"))
 
 
@@ -183,6 +181,8 @@ async def run_health(cfg: Config, *, max_lag: int = DEFAULT_MAX_LAG,
                      max_age: float = DEFAULT_MAX_AGE, out: Callable[[str], None] = print,
                      store_factory: Callable[[Config], Any] = fast_store,
                      source_factory: Callable[[Config], Any] = fast_source) -> int:
+    if max_lag < 0 or not math.isfinite(max_age) or max_age < 0:
+        raise ConfigError("health requires --max-lag >= 0 and a finite --max-age >= 0")
     store = store_factory(cfg)
     try:
         checkpoint, updated_at = await asyncio.to_thread(read_checkpoint, store)

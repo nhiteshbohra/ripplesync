@@ -67,7 +67,7 @@ def plan_chunks(start: int, end: int, node_ranges: List[Range], size: int,
     """Return (chunks_to_run, unavailable_ranges) for a requested [start, end]."""
     if start > end:
         raise ValueError("start must be <= end")
-    available = intersect(node_ranges, start, end)
     unavailable = subtract(start, end, node_ranges)
+    available = subtract(start, end, unavailable)  # merge overlapping/adjacent node ranges
     chunks = [c for a, b in available for c in grid_chunks(a, b, size) if c not in done]
     return chunks, unavailable

@@ -53,7 +53,7 @@ def test_lock_held_by_another_process_and_freed_when_it_dies(tmp_path):
         # The interpreter's own pid: in a Windows venv, child.pid is the venv launcher, which
         # starts the real python.exe as its child.
         assert e.value.holder["pid"] == pid
-        assert probe(p)["held"] == "yes"
+        assert probe(p)["held"] == "unknown (read-only inspection)"
     finally:
         child.kill()  # like a crash: no cleanup code runs
         child.wait(30)
@@ -69,7 +69,7 @@ def test_lock_held_by_another_process_and_freed_when_it_dies(tmp_path):
                 raise
             time.sleep(0.2)
     info = probe(p)
-    assert info["held"] == "no" and info["pid"] == str(os.getpid())  # last holder: us
+    assert info["held"] == "unknown (read-only inspection)" and info["pid"] == str(os.getpid())
 
 
 def test_probe_does_not_overwrite_holder_info(tmp_path):
@@ -77,7 +77,8 @@ def test_probe_does_not_overwrite_holder_info(tmp_path):
     with open(p, "w") as f:
         f.write("pid=123\nhost=old\nstarted=2026-01-01T00:00:00Z\n")
     info = probe(p)
-    assert info == {"pid": "123", "host": "old", "started": "2026-01-01T00:00:00Z", "held": "no"}
+    assert info == {"pid": "123", "host": "old", "started": "2026-01-01T00:00:00Z",
+                    "held": "unknown (read-only inspection)"}
     assert read_info(p)["pid"] == "123"
     assert probe(str(tmp_path / "none.lock")) is None
 

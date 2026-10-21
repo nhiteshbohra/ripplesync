@@ -40,7 +40,7 @@ from typing import Any, Dict, FrozenSet, List, MutableMapping, Optional
 
 from ..config import FIRST_LEDGER, resolve_path
 from ..errors import ConfigError
-from ..ledger_ranges import grid_chunks
+from ..ledger_ranges import grid_chunks, subtract
 
 log = logging.getLogger(__name__)
 
@@ -263,17 +263,31 @@ def _utc(dt: Any) -> Optional[datetime]:
 
 def range_progress(store: Any, start: int, end: int, chunk_size: int,
              now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Chunk progress of [start, end] from the chunk docs (done = marked chunk docs inside
-    the range). Rate from the completed_at of the most recent chunks."""
+    """Unique marked coverage in [start, end], expressed on the current chunk grid.
+
+    Retained old grids and partial ranges count once. Overlapping markers have no rate.
+    """
     from ..store import CHUNK_KIND
     now = now or datetime.now(timezone.utc)
-    total_chunks = len(grid_chunks(start, end, chunk_size)) if end >= start else 0
-    q = {"kind": CHUNK_KIND, "start": {"$gte": start}, "end": {"$lte": end}}
+    chunks = grid_chunks(start, end, chunk_size)
+    q = {"kind": CHUNK_KIND, "start": {"$lte": end}, "end": {"$gte": start}}
     docs = list(store.meta.find(q, {"start": 1, "end": 1, "completed_at": 1, "_id": 0}))
-    done_ledgers = sum(d["end"] - d["start"] + 1 for d in docs)
+    for d in docs:
+        d["start"], d["end"] = max(start, d["start"]), min(end, d["end"])
+    docs = [d for d in docs if d["start"] <= d["end"]]
+    gaps = subtract(start, end, ((d["start"], d["end"]) for d in docs))
+    covered = subtract(start, end, gaps)  # complement of gaps merges overlapping marks
+    done_ledgers = sum(b - a + 1 for a, b in covered)
+    chunks_done = 0
+    i = 0
+    for a, b in chunks:
+        while i < len(covered) and covered[i][1] < a:
+            i += 1
+        if i < len(covered) and covered[i][0] <= a and b <= covered[i][1]:
+            chunks_done += 1
     failed = store.failed.count_documents({"block_number": {"$gte": start, "$lte": end}})
     out: Dict[str, Any] = {
-        "start": start, "end": end, "chunks_done": len(docs), "chunks_total": total_chunks,
+        "start": start, "end": end, "chunks_done": chunks_done, "chunks_total": len(chunks),
         "ledgers_done": done_ledgers, "ledgers_total": max(0, end - start + 1),
         "failed_ledgers": failed, "rate": None, "eta_seconds": None, "last_completed": None,
     }
@@ -282,7 +296,9 @@ def range_progress(store: Any, start: int, end: int, chunk_size: int,
     if timed:
         out["last_completed"] = timed[-1][0]
     recent = timed[-RATE_WINDOW:]
-    if len(recent) >= 2:
+    # ponytail: omit rate/ETA for overlapping historical grids; persist unique progress
+    # events if a rate across repeated work is needed. Never count replay as new coverage.
+    if len(recent) >= 2 and sum(d["end"] - d["start"] + 1 for d in docs) == done_ledgers:
         span = (recent[-1][0] - recent[0][0]).total_seconds()
         if span > 0:
             out["rate"] = sum(n for _, n in recent[1:]) / span

@@ -17,11 +17,12 @@ from importlib import metadata
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pymongo.errors import ExecutionTimeout, OperationFailure, PyMongoError
+from pymongo.write_concern import WriteConcern
 
 from .. import __version__
 from ..config import ENV_VARS, WINDOWS_MAX_PROCESSES, Config, display_value, redact_mongo_uri
 from .monitor import GB, local_free_bytes, mongo_free_bytes
-from ..errors import IngestError, NetworkMismatch
+from ..errors import ConfigError, IngestError, NetworkMismatch
 from .monitor import FAST_TIMEOUT_S, fast_source, fast_store
 from .runcontrol import lock_path, probe
 from .files import EnvFile, control_chars
@@ -171,12 +172,8 @@ def check_paths(r: Report, cfg: Config, env: EnvFile, command_locks=COMMAND_KEYS
         if info is None:
             continue
         who = f"pid {info.get('pid', '?')} on {info.get('host', '?')} since {info.get('started', '?')}"
-        if info["held"] == "yes":
-            r.add(f"lock {cmd}", "info", f"{cmd} is running ({who})")
-        elif info["held"] == "no":
-            r.add(f"lock {cmd}", "info", f"stale lock file, not held (last: {who}); harmless")
-        else:
-            r.add(f"lock {cmd}", "warn", f"cannot probe {lock_path(cfg.base_dir, cmd)}: {info['held']}")
+        r.add(f"lock {cmd}", "info", f"last recorded holder: {who}; "
+              "current ownership unknown (read-only inspection)")
 
 
 def _check_env_perms(r: Report, path: Optional[str]) -> None:
@@ -255,6 +252,8 @@ def check_host(r: Report, cfg: Config) -> None:
 class _Recorder:
     """Stands in for a pymongo client/db/collection to learn which indexes
     MongoStore.ensure_indexes creates (no server involved)."""
+
+    write_concern = WriteConcern()
 
     def __init__(self, sink: List[Tuple[str, Any, Dict[str, Any]]], name: str = ""):
         self._sink, self._name = sink, name
@@ -386,7 +385,7 @@ def check_chunk_docs(r: Report, meta: Any, chunk_size: int) -> None:
 def check_mongo(r: Report, cfg: Config, store_factory: Callable[[Config], Any] = fast_store) -> None:
     try:
         store = store_factory(cfg)
-    except PyMongoError as e:  # e.g. ConfigurationError for a bad URI option
+    except (ConfigError, PyMongoError) as e:  # invalid write concern or URI options
         r.add("mongo", "fail", f"{type(e).__name__}: {e}", 2)
         return
     try:

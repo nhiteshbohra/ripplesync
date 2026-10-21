@@ -127,9 +127,11 @@ def node_tx_hashes(index: int, result: Dict[str, Any]) -> List[str]:
     got = to_int(ledger.get("ledger_index", result.get("ledger_index")))
     if got != index:
         raise MalformedLedger(f"asked for ledger {index}, node returned {got!r}")
-    txs = ledger.get("transactions", [])
-    if not isinstance(txs, list) or not all(isinstance(h, str) for h in txs):
+    txs = ledger.get("transactions")
+    if not isinstance(txs, list) or not all(isinstance(h, str) and h for h in txs):
         raise MalformedLedger(f"ledger {index}: 'transactions' is not a list of hashes")
+    if len(txs) != len(set(txs)):
+        raise MalformedLedger(f"ledger {index}: duplicate transaction hash")
     return txs
 
 

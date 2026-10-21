@@ -302,17 +302,10 @@ class InstanceLock:
 
 
 def probe(path: str) -> Optional[Dict[str, str]]:
-    """None if no lock file; else holder info plus held='yes'/'no' (doctor). Taking the
-    lock for a moment can make a command starting in that instant exit 5; rerun it."""
+    """Read last-holder metadata without competing for the ingestion lock.
+
+    File presence and recorded PID cannot establish current OS lock ownership.
+    """
     if not os.path.exists(path):
         return None
-    info = read_info(path)
-    lk = InstanceLock(path)
-    try:
-        lk.acquire(write_info=False)
-    except LockHeld:
-        return {**info, "held": "yes"}
-    except OSError as e:
-        return {**info, "held": f"unknown ({e})"}
-    lk.release()
-    return {**info, "held": "no"}
+    return {**read_info(path), "held": "unknown (read-only inspection)"}

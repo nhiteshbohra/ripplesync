@@ -47,3 +47,8 @@ LEGACY_REVIEW.md
 # Legacy scripts: kept on disk, not pushed (history has them: commit 03df819)
 ripple blockchain pastcode/
 project_map
+USER_CHAOS_REVIEW.md
+
+# Local chaos-review report and reproduction script
+/reviews/ingestion-pipeline-chaos-review.md
+/reviews/check_ingestion_findings.py

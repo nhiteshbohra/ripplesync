@@ -223,12 +223,13 @@ def test_env_permissions_not_checked_on_windows(dcfg, tmp_path):
     assert "not checked on Windows" in out
 
 
-def test_locks_reported_held_or_stale(dcfg, tmp_path):
+def test_locks_report_last_holder_without_claiming_current_ownership(dcfg, tmp_path):
     with InstanceLock(lock_path(str(tmp_path), "tail"), "tail"):
         InstanceLock(lock_path(str(tmp_path), "backfill"), "backfill").acquire().release()
         code, out = run_dr(dcfg)
     assert code == 0
-    assert "tail is running (pid" in out and "stale lock file, not held" in out
+    assert out.count("last recorded holder: pid") == 2
+    assert "current ownership unknown (read-only inspection)" in out
 
 
 def test_windows_process_cap_shown(dcfg, monkeypatch):

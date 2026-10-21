@@ -13,7 +13,6 @@ import re
 import shutil
 import sys
 import tempfile
-import time
 from typing import List
 
 HEADER = re.compile(r"^\[([A-Za-z0-9_]+)\]\s*$")
@@ -101,6 +100,52 @@ def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[
     return text
 
 
+def ws_url(text: str) -> str:
+    """Read the local WebSocket stanza managed by this installer without changing it."""
+    stanzas = dict(_split(text)[1])
+    if "port_ws_admin_local" not in [s.strip() for s in stanzas.get("server", [])]:
+        raise ValueError("[server] does not enable port_ws_admin_local; set NODE_WS explicitly")
+    values = {}
+    for line in stanzas.get("port_ws_admin_local", []):
+        key, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    try:
+        port = int(values.get("port", ""))
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        raise ValueError("invalid WebSocket port; set NODE_WS explicitly") from None
+    protocols = [p.strip() for p in values.get("protocol", "").split(",")]
+    scheme = "ws" if "ws" in protocols else "wss" if "wss" in protocols else None
+    host = values.get("ip", "")
+    if not scheme or not host:
+        raise ValueError("missing WebSocket protocol/ip; set NODE_WS explicitly")
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{scheme}://{host}:{port}"
+
+
+def backup(path: str, *, private: bool = False):
+    """Reserve a unique backup name, including for repeated edits in the same second."""
+    if not os.path.exists(path):
+        return None
+    fd, dst = tempfile.mkstemp(prefix=os.path.basename(path) + ".bak.",
+                               dir=os.path.dirname(os.path.abspath(path)))
+    os.close(fd)
+    try:
+        shutil.copyfile(path, dst)
+        if private:
+            os.chmod(dst, 0o600)
+        else:
+            shutil.copystat(path, dst)
+        return dst
+    except BaseException:
+        os.unlink(dst)
+        raise
+
+
 def write_atomic(path: str, text: str) -> None:
     """Write via a temp file in the same dir + os.replace; keep the original mode and owner.
 
@@ -135,21 +180,30 @@ def write_atomic(path: str, text: str) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cfg")
-    ap.add_argument("--db-path", required=True)
+    ap.add_argument("--db-path")
+    ap.add_argument("--ws-url", action="store_true", help="only print the configured WebSocket URL")
     ap.add_argument("--history", choices=("full", "pruned"), default="full")
     ap.add_argument("--node-size", choices=NODE_SIZES, default="huge")
     ap.add_argument("--peer", action="append", default=[])
     a = ap.parse_args(argv)
+
+    if not a.ws_url and a.db_path is None:
+        ap.error("--db-path is required when editing")
 
     try:
         with open(a.cfg, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
         text = ""
-    backup = f"{a.cfg}.bak.{int(time.time())}"
-    if text:
-        shutil.copy2(a.cfg, backup)  # keeps mode/timestamps
-        print(f"backup: {backup}")
+    if a.ws_url:
+        try:
+            print(ws_url(text))
+        except ValueError as exc:
+            ap.error(str(exc))
+        return 0
+    saved = backup(a.cfg)
+    if saved:
+        print(f"backup: {saved}")
     new = apply(text, db_path=a.db_path, history=a.history, node_size=a.node_size, peers=a.peer)
     os.makedirs(os.path.dirname(os.path.abspath(a.cfg)), exist_ok=True)
     write_atomic(a.cfg, new)

@@ -44,7 +44,7 @@ FORCE="${FORCE:-0}"
 DB_PATH="${DB_PATH:-/var/lib/xrpld/db/nudb}"
 SYNC_WAIT_MIN="${SYNC_WAIT_MIN:-30}"
 LOCAL_MONGO="mongodb://127.0.0.1:27017"
-NODE_WS="ws://127.0.0.1:6006"
+NODE_WS="${NODE_WS:-}"
 TEST_DB="xrpl_test"
 SERVER_DB="xrpl_data_collection"
 
@@ -279,11 +279,12 @@ step_python() {
 
 # env_set KEY=VALUE ... : write into .env (created from .env.example; backup kept; values never printed)
 env_set() { python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --example "$REPO_DIR/.env.example" "$@"; }
-env_get() { "$REPO_DIR/.venv/bin/python" -c "from dotenv import dotenv_values as d; print(d('$REPO_DIR/.env').get('$1') or '')" 2>/dev/null || true; }
+env_get() { "$REPO_DIR/.venv/bin/python" -c 'import sys; from xrpl_ingest.support.files import load_env; print(load_env({}, cwd=sys.argv[1]).values.get(sys.argv[2]) or "")' "$REPO_DIR" "$1"; }
 
 step_env() {
   local mode="$1" uri="${MONGO_URI:-}" have_uri=0 db
-  python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --has MONGO_URI && have_uri=1 || true
+  if [ -n "${MONGO_URI_FILE:-}" ] || python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --has MONGO_URI || \
+     python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --has MONGO_URI_FILE; then have_uri=1; fi
   if [ -z "$uri" ] && [ "$have_uri" = 0 ]; then
     if port_open 127.0.0.1 27017; then uri="$LOCAL_MONGO"
     else
@@ -291,9 +292,13 @@ step_env() {
       while [ -z "$uri" ]; do read -rs -p "MongoDB address (MONGO_URI, input hidden; e.g. $LOCAL_MONGO): " uri; echo; done
     fi
   fi
+  if [ -z "$NODE_WS" ]; then
+    NODE_WS="$($SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$CFG" --ws-url)" || die "cannot read the node WebSocket endpoint; set NODE_WS explicitly"
+  fi
   # Same settings for test and server (test is the server in small); only the database differs.
   local args=("SERVERS=$NODE_WS" "CHUNK_SIZE=1000" "NUM_PROCESSES=$(( CORES < 4 ? CORES : 4 ))" "CONCURRENCY=16")
   [ -z "$uri" ] || args+=("MONGO_URI=$uri")
+  if [ -n "${MONGO_URI_FILE:-}" ] && [ -z "$uri" ] && [ ! -f "$REPO_DIR/.env" ]; then args+=("MONGO_URI="); fi
   db="$(env_get DB_NAME)"
   if [ "$mode" = test ]; then
     args+=("DB_NAME=$TEST_DB")

@@ -85,14 +85,14 @@ function Update-PathFromRegistry {
     $env:Path = "$m;$u"
 }
 
-# Tested Python 3.12 through the py launcher. Returns @(exe, args, version) or $null.
+# Tested Python 3.12, preferring the existing venv. Returns @(exe, optional arg, version).
 function Find-Python {
-    if (-not (Get-Command py -ErrorAction SilentlyContinue)) { return $null }
-    foreach ($tag in @('-3.12')) {
-        $v = Get-NativeOutput 'py' @($tag, '-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))')
-        if ($v) {
-            $parts = $v.Split('.')
-            if ([int]$parts[0] -eq 3 -and [int]$parts[1] -eq 12) { return @('py', $tag, $v) }
+    foreach ($candidate in @(@($venvPy, ''), @('py', '-3.12'), @('python3.12', ''), @('python', ''), @('python3', ''))) {
+        if ((Test-Path -LiteralPath $candidate[0] -PathType Leaf) -or (Get-Command $candidate[0] -ErrorAction SilentlyContinue)) {
+            $arguments = @()
+            if ($candidate[1]) { $arguments += $candidate[1] }
+            $v = Get-NativeOutput $candidate[0] ($arguments + @('-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))'))
+            if ($v -eq '3.12') { return @($candidate[0], $candidate[1], $v) }
         }
     }
     return $null
@@ -111,7 +111,7 @@ $py = Find-Python
 $mongoSvc = Get-Service -Name 'MongoDB' -ErrorAction SilentlyContinue
 $mongoUp = Test-Port '127.0.0.1' 27017
 $mongoState = if ($mongoUp) { 'running on 127.0.0.1:27017' } elseif ($mongoSvc) { "installed (service $($mongoSvc.Status))" } else { 'not installed' }
-$pyState = if ($py) { "Python $($py[2]) (py $($py[1]))" } else { 'Python 3.12 not found' }
+$pyState = if ($py) { "Python $($py[2]) ($($py[0]) $($py[1]))" } else { 'Python 3.12 not found' }
 $envState = if (Test-Path -LiteralPath (Join-Path $repo '.env')) { 'exists' } else { 'none' }
 $venvState = if (Test-Path -LiteralPath $venvPy) { 'exists' } else { 'none' }
 
@@ -215,7 +215,9 @@ if (Test-Path -LiteralPath (Join-Path $repo '.venv')) {
 }
 if (-not (Test-Path -LiteralPath $venvPy)) {
     Say 'Creating .venv'
-    $rc = Invoke-Native $py[0] @($py[1], '-m', 'venv', (Join-Path $repo '.venv'))
+    $pythonArgs = @()
+    if ($py[1]) { $pythonArgs += $py[1] }
+    $rc = Invoke-Native $py[0] ($pythonArgs + @('-m', 'venv', (Join-Path $repo '.venv')))
     if ($rc -ne 0) { Fail "creating .venv failed (exit $rc)" }
 }
 if ((Get-NativeOutput $venvPy @('-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))')) -ne '3.12') { Fail '.venv is not using Python 3.12' }
@@ -228,13 +230,15 @@ Ok 'Python environment ready: .venv'
 # ---------------------------------------------------------------------------------- 5. .env
 $envPath = Join-Path $repo '.env'
 $envArgs = @((Join-Path $repo 'setup\envfile.py'), $envPath, '--example', (Join-Path $repo '.env.example'))
-$hasUri = (Invoke-Native $venvPy @((Join-Path $repo 'setup\envfile.py'), $envPath, '--has', 'MONGO_URI')) -eq 0
-if (-not $hasUri) { $envArgs += "MONGO_URI=$localMongo" }
+$hasUri = $env:MONGO_URI -or ((Invoke-Native $venvPy @((Join-Path $repo 'setup\envfile.py'), $envPath, '--has', 'MONGO_URI')) -eq 0)
+$hasUriFile = $env:MONGO_URI_FILE -or ((Invoke-Native $venvPy @((Join-Path $repo 'setup\envfile.py'), $envPath, '--has', 'MONGO_URI_FILE')) -eq 0)
+if (-not $hasUri -and -not $hasUriFile) { $envArgs += "MONGO_URI=$localMongo" }
+if ($hasUriFile -and -not $hasUri -and -not (Test-Path -LiteralPath $envPath)) { $envArgs += 'MONGO_URI=' }
 if ($Mode -eq 'test') {
     $envArgs += @("SERVERS=$publicServers", 'DB_NAME=xrpl_test', 'NUM_PROCESSES=1', 'CONCURRENCY=2', 'CHUNK_SIZE=100')
 } else {
     $envArgs += @("SERVERS=$NodeUrl", 'CHUNK_SIZE=1000', "NUM_PROCESSES=$([math]::Min($cores, 4))", 'CONCURRENCY=16')
-    $db = Get-NativeOutput $venvPy @('-c', "from dotenv import dotenv_values as d; print(d(r'$envPath').get('DB_NAME') or '')")
+    $db = Get-NativeOutput $venvPy @('-c', "import sys; from xrpl_ingest.support.files import load_env; print(load_env({}, cwd=sys.argv[1]).values.get('DB_NAME') or '')", $repo)
     if ($db -eq 'xrpl_test' -or $db -eq 'xrpl_trial') { $envArgs += 'DB_NAME=xrpl_data_collection' }
 }
 Say "Writing settings into .env ($Mode setup)"
@@ -245,7 +249,7 @@ if ($rc -ne 0) { Fail "writing .env failed (exit $rc)" }
 $env:PYTHONUTF8 = '1'
 $env:XRPL_INGEST_HOME = $repo
 Say 'Running the test suite'
-$uri = Get-NativeOutput $venvPy @('-c', "from dotenv import dotenv_values as d; print(d(r'$envPath').get('MONGO_URI') or '')")
+$uri = Get-NativeOutput $venvPy @('-c', "import sys; from xrpl_ingest.support.files import load_env; print(load_env({}, cwd=sys.argv[1]).values.get('MONGO_URI') or '')", $repo)
 if ($mongoUp -and ($uri -like 'mongodb://127.0.0.1:27017*' -or $uri -like 'mongodb://localhost:27017*')) {
     Remove-Item Env:XRPL_INGEST_NO_INTEGRATION -ErrorAction SilentlyContinue
 } else {

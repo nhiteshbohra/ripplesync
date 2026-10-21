@@ -261,7 +261,7 @@ def test_unrecorded_failure_holds_checkpoint_and_retries(store, monkeypatch):
     last = asyncio.run(tail(src, store, FAST_RETRY, poll_interval=2.0, stop_check=lambda: False,
                             sleep=sleep, max_iterations=2))
     assert seen == [98]  # held at 98 while 99 could be neither stored nor recorded
-    assert src.calls == [99] * FAST_RETRY.attempts + [99, 100]  # stalled on 99, then retried it
+    assert src.calls == [99, 99, 100]  # Mongo retries reuse the prepared ledger; tail retries after recovery
     assert last == 100 and store.get_checkpoint() == 100
     assert store.ledgers.count_documents({"block_number": 99}) == 1
     assert store.list_failed() == []
@@ -311,4 +311,4 @@ def test_stop_flag_during_unrecorded_failure_backoff(store, monkeypatch):
     last = asyncio.run(tail(src, store, FAST_RETRY, poll_interval=2.0,
                             stop_check=lambda: stopped["v"], sleep=sleep, max_iterations=10))
     assert last == 98 and store.get_checkpoint() == 98
-    assert src.calls == [99] * FAST_RETRY.attempts
+    assert src.calls == [99]  # Mongo retries do not download the ledger again

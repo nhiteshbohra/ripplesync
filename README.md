@@ -132,7 +132,7 @@ What happens:
    - MongoDB 8.0 from the official MongoDB repository, if it is missing (not inside WSL2: there MongoDB runs on Windows);
    - xrpld from the official XRPLF repository (the signing key is checked) and its config (a backup is kept): `test` = recent ledgers only, node size `small` or `medium` (from the RAM); `server` = full history, node size `huge`. Then the validator check (and repair, if you agree), the start, and a 20-second check that xrpld keeps running;
    - the Python environment `.venv` and its packages;
-   - the settings file `.env`, the same settings for both setups; only the database differs (`xrpl_test` / `xrpl_data_collection`). An existing `.env` is backed up and its MongoDB address is kept;
+   - the settings file `.env`, the same settings for both setups; only the database differs (`xrpl_test` / `xrpl_data_collection`). Existing MongoDB settings, including `MONGO_URI_FILE`, are kept. UTF-8/BOM and UTF-16/BOM files are supported; changed files have uniquely named backups. Linux reads the existing node WebSocket port; set `NODE_WS` explicitly to override that endpoint;
    - the test suite and the `doctor` check;
    - the services `xrpl-tail` and `xrpl-backfill` (installed, not started).
 5. **`test` only: the real-data checks.** It waits until the node is synced (up to 30 minutes; a new node usually needs 5-20), then runs the same commands you use on the server and reports the result:
@@ -1081,7 +1081,7 @@ All settings are optional except `MONGO_URI`. Defaults are shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MONGO_URI` | (required, or `MONGO_URI_FILE`) | MongoDB connection string, e.g. `mongodb://xrpl_ingest:<pw>@127.0.0.1:27017/?authSource=admin`. Must start with `mongodb://` or `mongodb+srv://`. |
+| `MONGO_URI` | (required, or `MONGO_URI_FILE`) | MongoDB connection string, e.g. `mongodb://xrpl_ingest:<pw>@127.0.0.1:27017/?authSource=admin`. Must start with `mongodb://` or `mongodb+srv://`. Store initialization rejects unacknowledged writes (`w=0`) with a configuration error; successful writes must report failures before completion markers advance. Other write-concern settings are preserved. |
 | `MONGO_URI_FILE` | empty | Path of a file that holds the URI on exactly one line (max 4096 bytes). Keeps the password out of `.env`; `chmod 600` the file. **Setting both `MONGO_URI` and `MONGO_URI_FILE` is a config error.** |
 | `DB_NAME` | `xrpl_data_collection` | Database name. **Use a fresh name if an old (legacy) database causes index errors.** |
 | `SERVERS` | `ws://127.0.0.1:6006` | Your node's admin websocket. Comma-separated; first is preferred, others are failover. **Never list testnet servers.** |
@@ -1106,10 +1106,10 @@ If the same option (`serverSelectionTimeoutMS`, `socketTimeoutMS`) is written in
 | Variable | Default | Meaning |
 |---|---|---|
 | `NUM_PROCESSES` | `4` | Backfill worker processes. **Windows: at most 61** (process pool limit; more is a config error). |
-| `CONCURRENCY` | `16` | Ledger requests in flight per process. Total load = `NUM_PROCESSES x CONCURRENCY`. |
+| `CONCURRENCY` | `16` | Fetch/transform producers per backfill process; at most this many ledger requests in flight. A separate bounded queue feeds up to `min(CONCURRENCY, 16)` writers. Total fetch concurrency = `NUM_PROCESSES x CONCURRENCY`. |
 | `CHUNK_SIZE` | `1000` | Ledgers per backfill chunk. **Do not change it after the backfill has started:** progress is stored per chunk, and a new size means a new chunk grid (work is redone, `doctor` warns). |
 | `MAX_RETRIES` | `5` | Attempts per ledger before it goes to the failed collection. |
-| `REQUEST_TIMEOUT` | `30` | Seconds to wait for one answer from the node. |
+| `REQUEST_TIMEOUT` | `30` | Deadline in seconds for sending one request and receiving its answer. |
 | `RECONNECT_DELAY_BASE` | `1` | First wait (seconds) before a reconnect / retry; it grows exponentially. |
 | `BACKOFF_MAX` | `30` | Longest wait between retries (seconds). |
 | `POLLING_INTERVAL_SECONDS` | `2` | How often `tail` asks the node for a new ledger. |
@@ -1235,7 +1235,7 @@ Rules:
 - The program reads the file once at start and never writes it. Changes apply at the next start.
 - The file is in `.gitignore` (it is your local choice). The repo ships `backfill_range.txt.example`.
 
-**Progress:** `status` shows progress for the range in the file: chunks done / total, percent, failed ledgers, speed, when the last chunk finished, and estimated time left. The speed is computed from the finish times of the stored chunks.
+**Progress:** `status` shows progress for the range in the file: chunks done / total, percent, failed ledgers, speed, when the last chunk finished, and estimated time left. Overlapping chunk marks from old grids count each ledger once; a current-grid chunk counts as done only when its whole range is covered. Partial marks and marks crossing the requested range are included. Speed uses stored chunk finish times; speed and ETA are omitted when marks overlap because those timestamps cannot distinguish replayed work from new progress. A marked range may still contain recorded failures; check the failed-ledger count and run `retry-failed`.
 
 ```bash
 python -m xrpl_ingest status
@@ -1283,7 +1283,7 @@ Every command ends with one of these codes. Scripts and services can react to th
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | OK | Nothing. |
-| `1` | Some ledgers failed, the run stopped early (stop file, signal, or `MIN_FREE_GB`), `verify` found problems, `health` lagging/stale, or `doctor` warnings | Read the log. Run `retry-failed` or `verify --repair`. |
+| `1` | Some ledgers failed, chunk progress could not be saved, the run stopped early (stop file, signal, or `MIN_FREE_GB`), `verify` found problems, `health` lagging/stale, or `doctor` warnings | Read the log. Rerun backfill for unsaved chunk progress; run `retry-failed` or `verify --repair` for failed ledgers. |
 | `2` | Config or usage error (also: node on the wrong network, bad Mongo credentials, bad range file) | Fix `.env`, the range file or the command. Retrying will not help. |
 | `3` | `backfill`: no failures, but the node does not have part of the range yet (see its `complete_ledgers`) | Normal while the node downloads history. Run again later. |
 | `4` | Node or MongoDB unreachable or failing | Check that xrpld / mongod run and the URIs are right. |
@@ -1299,7 +1299,7 @@ This is allowed and recommended (run `tail` from day 1 while the backfill fills 
 Both write the same way (upserts). If both happen to write the same ledger, the result is the same.
 Give each one its own `LOG_FILE` (see [Logs](#67-logs)).
 
-The lock is held by the operating system (`flock` on Linux/macOS, `msvcrt.locking` on Windows), not by the file's existence. If a process dies, the lock is free again. A leftover `.lock` file is harmless and is never deleted; it keeps the last holder's PID, host and start time. `doctor` shows each lock as running or stale. Note: `doctor` takes the lock for a moment to test it, so a command started in that exact instant may exit `5`; just start it again.
+The lock is held by the operating system (`flock` on Linux/macOS, `msvcrt.locking` on Windows), not by the file's existence. If a process dies, the lock is free again. A leftover `.lock` file is harmless and is never deleted; it keeps the last holder's PID, host and start time. `doctor` reads this metadata without acquiring the lock and reports current ownership as unknown. It cannot block ingestion startup; ingestion itself still enforces the exclusive lock.
 
 ### 6.6 Stopping gracefully
 
@@ -1365,12 +1365,17 @@ Backfill worker processes ignore Ctrl+C themselves; the main process tells them 
 
 - `deploy\windows\run.cmd` sets `LOG_FILE=logs\xrpl_ingest_<command>.log` by default (for example `logs\xrpl_ingest_tail.log`), unless `LOG_FILE` is already set.
 - Times are UTC, ISO 8601, ending with `Z` (e.g. `2026-10-18T09:15:02.123Z`).
+- Each log event occupies one physical line. Newlines, terminal control characters and traceback line breaks are escaped (for example `\n` and `\x1b`), preserving diagnostic text while preventing node errors from forging separate log lines. This applies to stderr, rotating files and worker records.
 - At start the program logs its version and all resolved paths (base folder, `.env`, stop file, range file, log file, lock). Check them if a file "is not found".
 - Backfill progress lines look like:
 
   ```
   chunks 1234/98000 (1.3%), 512 ledgers/s, ETA 2d04h
   ```
+
+- Each completed chunk also logs cumulative fetch, transform and write seconds. Stages
+  overlap and several requests run together, so these totals are **not additive elapsed
+  time**. Transform time includes executor waiting; it is not a CPU utilization measure.
 
 ---
 
@@ -1497,9 +1502,56 @@ xrpld does not rate-limit admin clients ([xrpl.org: Rate Limiting](https://xrpl.
 Important ideas:
 
 - **One request per ledger.** The node returns the ledger header, all transactions and their metadata in one answer.
+- **Explicit transaction lists.** Expanded ledger responses and deep-verification hash responses must contain `transactions`, including `[]` for an empty ledger. An omitted list is treated as malformed rather than saved or verified as an empty ledger.
+- **Transaction identity.** Transaction hashes must be nonempty strings and unique within a ledger, including deep-verification hash lists. Invalid identities are rejected before saving a bundle.
+- **Unique history coverage.** Backfill merges overlapping or adjacent node history ranges before splitting them into chunks, so repeated availability entries do not download the same ledger twice in a run.
 - **Ledger document last.** The ledger document is written only after all its transactions. If it exists, the ledger is complete. A crash in the middle is repaired by running again.
 - **Upserts.** Writing the same ledger twice gives the same result. You can always re-run a command safely.
+- **Checkpoint conversion.** Legacy string checkpoints are converted only if the value has not changed since it was read; a competing writer's newer numeric checkpoint is preserved.
+- **Damaged checkpoints.** A malformed, negative or fractional checkpoint stops tail/status/health with a configuration error; it is never silently reset. Back up the metadata document, inspect stored ledgers and recorded failures, then restore a verified non-negative integer checkpoint. Deleting it can invoke the documented start-at-latest behavior and leave a gap.
 - **Network guard.** The program refuses a server that reports another network (for example testnet). This stops testnet data from mixing with mainnet data, a bug of the old scripts.
+
+### Backfill pipeline and performance checks
+
+Backfill producers fetch and validate/transform ledgers while independent writers save
+earlier results. Ledgers with 64 or more transactions use one transform thread per process
+to keep that work off the WebSocket reader's event loop; smaller ledgers avoid the thread
+handoff. This transaction-count heuristic can miss unusually large metadata in a small
+ledger. The existing process pool supplies CPU parallelism. The waiting
+queue holds at most `min(CONCURRENCY, 8)` prepared ledgers. This is a ledger-count bound,
+not a byte budget: large responses still need enough RAM for in-flight work and batches.
+
+Writers drain available results into batches, capped at 16 ledgers with a soft limit of
+2,000 documents (one ledger can exceed that limit). They do not wait for a batch to fill.
+Transactions and metadata for the batch are upserted before its ledger completion
+documents. Failed batches are retried, then isolated into individual ledger saves so
+one invalid ledger does not prevent its neighbours from being saved. Database retries
+reuse prepared documents instead of downloading and transforming again; this also
+applies to `tail`, `fetch`, retries and repair. Graceful stops drain prepared work before
+returning, and interrupted chunks remain unmarked for rerunning.
+
+If the chunk completion write fails after its data was saved, the summary counts it in
+`chunks_unmarked` and backfill exits `1`. Successful data stays stored; the next backfill
+safely replays the unmarked chunk. The per-chunk log includes `marker_failed=True`.
+
+The stored schema and indexes are unchanged. This pipeline does not store a second raw
+copy or mark a ledger complete before transformation. Address/type queries still need
+to be evaluated separately from ingestion throughput; their retired indexes are not recreated.
+
+To compare the previous steady-state flow with the pipeline on your machine:
+
+```bash
+python setup/benchmark_ingest.py --ledgers 300 --transactions 20 --repeats 3 --compare
+python setup/benchmark_ingest.py --ledgers 100 --transactions 200 --repeats 3 --compare
+```
+
+The benchmark uses a synthetic node in a separate process and a real MongoDB at
+`127.0.0.1:27017`. It uses and removes only randomly named `xrpl_ingest_bench_*`
+databases, never loads `.env`, and checks document counts and ledger completeness
+after every run. It reports median throughput, write-command counts and pipeline stage
+timings. This is an isolated comparison, **not a full-history ETA**: benchmark real
+historical ranges on the intended server before forecasting completion. Batching may
+reduce database calls without increasing throughput when another resource is saturated.
 
 ---
 
@@ -1508,6 +1560,11 @@ Important ideas:
 ### The rule
 
 **Every piece of data the node sends is stored in MongoDB.** (Rule from `xrpl_ingest/transform.py`.)
+
+This applies to accepted ledger responses. If two keys in the same nested object would
+encode to the same MongoDB field name (for example `a.b` and `a` followed by U+FF0E and
+`b`), the response is rejected and the ledger is recorded as failed. Its transformed
+bundle is not saved; one field must never silently overwrite the other during conversion.
 
 - **Mapped fields** keep their names and conversions (tables below). Existing queries keep working.
 - **Every other field** is stored as received, under its own name.

@@ -159,7 +159,8 @@ def test_diff_hashes():
 def test_node_tx_hashes_validation():
     good = {"ledger": {"ledger_index": 5, "transactions": ["h1", "h2"]}, "validated": True}
     assert node_tx_hashes(5, good) == ["h1", "h2"]
-    assert node_tx_hashes(5, {"ledger": {"ledger_index": "5"}, "validated": True}) == []
+    assert node_tx_hashes(5, {"ledger": {"ledger_index": "5", "transactions": []},
+                              "validated": True}) == []
     with pytest.raises(NotValidated):
         node_tx_hashes(5, {**good, "validated": False})
     with pytest.raises(MalformedLedger, match="asked for ledger 6"):

@@ -47,7 +47,8 @@ EXIT_INTERRUPTED = 130
 EXIT_CODES = """\
 exit codes:
   0    ok
-  1    some ledgers failed, the run stopped early (stop file, signal, MIN_FREE_GB),
+  1    some ledgers failed, chunk progress could not be saved, or the run stopped early
+       (stop file, signal, MIN_FREE_GB),
        verify found problems, or health: lagging / stale; doctor: warnings
   2    config or usage error (incl. node on the wrong network, bad Mongo credentials)
   3    backfill had no failures, but the node lacks some requested ledgers
@@ -337,8 +338,8 @@ def _describe(e: BaseException) -> str:
 
 
 def backfill_exit_code(summary: dict) -> int:
-    """1 for failed ledgers or incomplete chunks, else 3 if the node lacked part of the range."""
-    if summary["ledgers_failed"] or summary["chunks_incomplete"]:
+    """1 for failed ledgers or incomplete/unmarked chunks; else 3 for unavailable history."""
+    if summary["ledgers_failed"] or summary["chunks_incomplete"] or summary.get("chunks_unmarked", 0):
         return 1
     return 3 if summary["unavailable_ranges"] else 0
 

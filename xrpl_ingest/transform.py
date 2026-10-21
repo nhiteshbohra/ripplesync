@@ -218,7 +218,13 @@ def escape_keys(value: Any) -> Any:
     """Deep copy of dicts/lists, made storable: every key escaped, and an int beyond int64
     (valid JSON, but BSON cannot hold it) as its exact decimal string. Else unchanged."""
     if isinstance(value, dict):
-        return {escape_key(k): escape_keys(v) for k, v in value.items()}
+        out = {}
+        for key, item in value.items():
+            escaped = escape_key(key)
+            if escaped in out:
+                raise MalformedLedger(f"field names collide after escaping: {key!r}")
+            out[escaped] = escape_keys(item)
+        return out
     if isinstance(value, list):
         return [escape_keys(v) for v in value]
     if isinstance(value, int) and not isinstance(value, bool) and abs(value) > INT64_MAX:
@@ -323,6 +329,7 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
     tx_docs: List[Dict[str, Any]] = []
     meta_docs: List[Dict[str, Any]] = []
     uncoerced: Dict[str, List[Any]] = {}
+    seen_hashes = set()
 
     for tx in transactions:
         if not isinstance(tx, dict):
@@ -357,8 +364,11 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
                 merge_field(doc, k, v)
 
         tx_hash = doc.get("hash")
-        if not tx_hash:
-            raise MalformedLedger(f"ledger {block_number}: transaction without hash")
+        if not isinstance(tx_hash, str) or not tx_hash:
+            raise MalformedLedger(f"ledger {block_number}: transaction without hash or with non-string hash")
+        if tx_hash in seen_hashes:
+            raise MalformedLedger(f"ledger {block_number}: duplicate transaction hash {tx_hash!r}")
+        seen_hashes.add(tx_hash)
 
         copy_deliver_max(doc)
         coerce_fields(doc, uncoerced)
@@ -404,7 +414,7 @@ def parse_ledger_result(index: int, result: Dict[str, Any], now: Optional[dateti
     if got != index:
         raise MalformedLedger(f"asked for ledger {index}, node returned {ledger.get('ledger_index')!r}")
 
-    txs = ledger.get("transactions", [])
+    txs = ledger.get("transactions")
     if not isinstance(txs, list):
         raise MalformedLedger(f"ledger {index}: 'transactions' is not a list")
 

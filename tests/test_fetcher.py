@@ -80,7 +80,9 @@ def test_mongo_error_retried(store, monkeypatch):
         return real(*a)
 
     monkeypatch.setattr(store, "save_ledger_bundle", flaky)
-    assert ingest(FakeSource(), store).ok and state["n"] == 2
+    src = FakeSource()
+    assert ingest(src, store).ok and state["n"] == 2
+    assert src.calls == [100]  # database retry reuses the already fetched and transformed data
 
 
 def test_ledger_doc_written_last_so_partial_save_is_not_marked_complete(store, monkeypatch):

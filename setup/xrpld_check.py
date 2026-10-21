@@ -8,7 +8,7 @@ A wrong validator list key stops xrpld right after start ("Manifest counts" is t
 then exit 255). In the xrpld 3.4.1 example config the validator settings live in validators.txt
 ([validators_file] in xrpld.cfg), with the two official publisher keys below.
 
-`fix` keeps copies (<file>.bak.<unix time>), removes validator stanzas from xrpld.cfg, points
+`fix` keeps unique copies (<file>.bak.*), removes validator stanzas from xrpld.cfg, points
 [validators_file] at validators.txt and writes the official validators.txt. Run it only if you do
 not use your own validator list on purpose.
 """
@@ -17,9 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import sys
-import time
 from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -96,11 +94,7 @@ def _read(path: str) -> Optional[str]:
 
 
 def _backup(path: str) -> Optional[str]:
-    if not os.path.exists(path):
-        return None
-    dst = f"{path}.bak.{int(time.time())}"
-    shutil.copy2(path, dst)
-    return dst
+    return edit_cfg.backup(path)
 
 
 def run(cmd: str, cfg_path: str) -> Tuple[int, List[str]]:
@@ -118,14 +112,15 @@ def run(cmd: str, cfg_path: str) -> Tuple[int, List[str]]:
     if not found:
         return 0, ["nothing to fix"]
     msgs = []
-    for p in (cfg_path, vfile):
+    new_vfile = os.path.join(os.path.dirname(os.path.abspath(cfg_path)), "validators.txt")
+    for p in dict.fromkeys((cfg_path, vfile, new_vfile)):
         b = _backup(p)
         if b:
             msgs.append(f"backup: {b}")
     new_cfg = fixed_cfg(cfg_text)
-    new_vfile = os.path.join(os.path.dirname(os.path.abspath(cfg_path)), "validators.txt")
-    edit_cfg.write_atomic(cfg_path, new_cfg)
+    # Publish the target first: interruption must never leave a dangling config pointer.
     edit_cfg.write_atomic(new_vfile, OFFICIAL_VALIDATORS_TXT)
+    edit_cfg.write_atomic(cfg_path, new_cfg)
     msgs.append(f"wrote {cfg_path} (validator stanzas removed, [validators_file] validators.txt)")
     msgs.append(f"wrote {new_vfile} (official xrpld 3.4.1 validator list)")
     return 0, msgs

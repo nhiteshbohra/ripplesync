@@ -6,9 +6,9 @@ import logging
 import multiprocessing
 import re
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Callable, List, Optional, Set, Tuple
 
@@ -18,7 +18,7 @@ from .config import Config
 from .config import FIRST_LEDGER
 from .support.monitor import DiskGuard
 from .errors import IngestError, TransientError
-from .fetcher import RetryPolicy, Sleep, ingest_ledger
+from .fetcher import RetryPolicy, Sleep, failed_ledger, ingest_ledger, persist_bundles, prepare_ledger
 from .ledger_ranges import Range, parse_complete_ledgers, plan_chunks
 from .support.logsetup import (ChunkProgress, setup_logging, setup_worker_logging,
                        start_queue_listener, stop_queue_listener)
@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 COMMAND = "backfill"  # stop-file key and lock name
 POLL_SECONDS = 1.0  # the parent re-checks stop file / signals / disk this often
+WRITE_BATCH_LEDGERS = 16
+WRITE_BATCH_DOCUMENTS = 2000
+WRITE_WORKERS = 16  # capped by CONCURRENCY; preserve the existing default write parallelism
 
 
 @dataclass
@@ -39,6 +42,8 @@ class ChunkResult:
     failed: int = 0
     unrecorded: int = 0  # failures not in the failed collection; chunk is then not marked done
     completed: bool = True  # False when stopped early; such chunks are not marked done
+    timings: dict = field(default_factory=dict)  # cumulative stage wall time, not additive elapsed time
+    marker_failed: bool = False  # data saved, but the chunk completion write failed
 
 
 def retry_policy(cfg: Config) -> RetryPolicy:
@@ -50,21 +55,89 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
                         sleep: Sleep = asyncio.sleep) -> ChunkResult:
     res = ChunkResult(chunk)
     indices = iter(range(chunk[0], chunk[1] + 1))  # shared; next() has no await so it is race-free
+    # ponytail: bounds queued ledger count, not bytes; add a byte budget if large responses
+    # dominate RAM. Each producer holds at most one additional ledger; no full-chunk buffer.
+    ready: asyncio.Queue = asyncio.Queue(maxsize=max(1, min(concurrency, 8)))
+    writers = max(1, min(concurrency, WRITE_WORKERS))
+    # CPU parallelism comes from the existing process pool. One transform thread per
+    # process keeps the socket reader responsive without competing with MongoDB threads.
+    transforms = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xrpl-transform")
 
-    async def worker() -> None:
+    def count(r) -> None:
+        if r.ok:
+            res.ok += 1
+        else:
+            res.failed += 1
+            if not r.recorded:
+                res.unrecorded += 1
+
+    async def producer() -> None:
         for idx in indices:
             if stop_check():
                 res.completed = False
                 return
-            r = await ingest_ledger(source, store, idx, retry, sleep=sleep)
-            if r.ok:
-                res.ok += 1
-            else:
-                res.failed += 1
-                if not r.recorded:
-                    res.unrecorded += 1
+            try:
+                bundle = await prepare_ledger(source, idx, retry, sleep=sleep, timings=res.timings,
+                                              executor=transforms)
+            except Exception as e:
+                count(await failed_ledger(store, idx, e))
+                continue
+            await ready.put(bundle)
 
-    await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
+    async def write(batch: list) -> None:
+        if len(batch) > 1:
+            try:
+                await persist_bundles(store, batch, retry, sleep=sleep, timings=res.timings)
+                res.ok += len(batch)
+                return
+            except Exception as e:
+                log.warning("batch save failed (%s); isolating %d ledger(s)", e, len(batch))
+        for bundle in batch:
+            idx = bundle[0]["block_number"]
+            try:
+                await persist_bundles(store, [bundle], retry, sleep=sleep, timings=res.timings)
+                res.ok += 1
+            except Exception as e:
+                count(await failed_ledger(store, idx, e))
+
+    async def writer() -> None:
+        finished = False
+        while not finished:
+            item = await ready.get()
+            if item is None:
+                return
+            batch = [item]
+            documents = 1 + len(item[1]) + len(item[2])
+            # Drain available work without waiting to fill a batch (also flushes the tail).
+            # A single large ledger can exceed the soft document cap; PyMongo splits commands.
+            while len(batch) < WRITE_BATCH_LEDGERS and documents < WRITE_BATCH_DOCUMENTS:
+                try:
+                    item = ready.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:
+                    finished = True
+                    break
+                batch.append(item)
+                documents += 1 + len(item[1]) + len(item[2])
+            await write(batch)
+
+    producers = [asyncio.create_task(producer()) for _ in range(max(1, concurrency))]
+
+    async def finish_producers() -> None:
+        await asyncio.gather(*producers)
+        for _ in range(writers):
+            await ready.put(None)
+
+    consumers = [asyncio.create_task(writer()) for _ in range(writers)]
+    tasks = producers + [asyncio.create_task(finish_producers())] + consumers
+    try:
+        await asyncio.gather(*tasks[len(producers):])
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(transforms.shutdown, wait=True, cancel_futures=True)
     if res.unrecorded:
         log.error("chunk %d-%d: %d failed ledgers could not be recorded; chunk left unmarked so "
                   "the next backfill redoes it", chunk[0], chunk[1], res.unrecorded)
@@ -72,6 +145,7 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
         try:
             await asyncio.to_thread(store.mark_chunk_done, chunk[0], chunk[1], res.ok, res.failed)
         except PyMongoError as e:
+            res.marker_failed = True
             log.error("chunk %d-%d: could not mark done (%s); the next backfill redoes it",
                       chunk[0], chunk[1], e)
     return res
@@ -190,7 +264,7 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
         summary = {
             "chunks_run": len(results),
             "chunks_incomplete": sum(1 for r in results if not r.completed) + lost,
-            "chunks_unmarked": sum(1 for r in results if r.unrecorded),
+            "chunks_unmarked": sum(bool(r.unrecorded or r.marker_failed) for r in results),
             "ledgers_ok": sum(r.ok for r in results),
             "ledgers_failed": sum(r.failed for r in results),
             "unavailable_ranges": unavailable,
@@ -318,11 +392,14 @@ def _terminate(pool: ProcessPoolExecutor) -> None:
 
 def _log_chunk(r: ChunkResult, t0: float, progress: Optional[ChunkProgress] = None) -> None:
     tail = ""
-    if progress is not None and r.completed:
+    if progress is not None and r.completed and not r.unrecorded and not r.marker_failed:
         tail = "; " + progress.update(r.chunk)
-    log.info("chunk %d-%d: ok=%d failed=%d unrecorded=%d completed=%s (elapsed %.0fs)%s",
-             r.chunk[0], r.chunk[1], r.ok, r.failed, r.unrecorded, r.completed,
+    log.info("chunk %d-%d: ok=%d failed=%d unrecorded=%d completed=%s marker_failed=%s (elapsed %.0fs)%s",
+             r.chunk[0], r.chunk[1], r.ok, r.failed, r.unrecorded, r.completed, r.marker_failed,
              time.time() - t0, tail)
+    log.info("chunk %d-%d stage totals (overlapping seconds): fetch=%.3f transform=%.3f write=%.3f",
+             *r.chunk, r.timings.get("fetch_seconds", 0), r.timings.get("transform_seconds", 0),
+             r.timings.get("write_seconds", 0))
 
 
 _CLOSE_1009 = re.compile(r"\b1009 \(message too big\)")  # websockets close-code text

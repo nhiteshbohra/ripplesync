@@ -7,20 +7,30 @@ usage: envfile.py ENV_PATH [--example .env.example] KEY=VALUE ...    set values 
 Comments, other keys and their order stay as they are. An existing key is changed in place
 (every uncommented copy, so the last one - the one python-dotenv uses - is right too);
 a missing key goes under its commented example line (`# KEY=...`) or at the end.
-Before a changed existing file is rewritten, a copy is kept as ENV_PATH.bak.<unix time>.
+Before a changed existing file is rewritten, a unique ENV_PATH.bak.* copy is kept.
 Values are never printed (MONGO_URI may hold a password). POSIX: the file is chmod 600.
 """
 from __future__ import annotations
 
 import argparse
+import codecs
 import os
 import re
-import shutil
 import sys
-import time
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
+from edit_cfg import backup
+
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def read_text(path: str) -> str:
+    # Standalone bootstrap helper: no application/dependency imports before installation.
+    with open(path, "rb") as f:
+        data = f.read()
+    encoding = "utf-16" if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE) else "utf-8-sig"
+    return data.decode(encoding)
 
 
 def quote(value: str) -> str:
@@ -31,7 +41,7 @@ def quote(value: str) -> str:
     if plain:
         return value
     if "'" not in value:
-        return f"'{value}'"  # single quotes: taken literally by python-dotenv
+        return "'" + value.replace("\\", "\\\\") + "'"
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -83,8 +93,14 @@ def get_value(text: str, key: str) -> Optional[str]:
         k, commented = _line_key(line)
         if k == key and not commented:
             v = line.split("=", 1)[1].strip()
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
-                v = v[1:-1]
+            quoted = re.fullmatch(r'''('(?:\\'|[^'])*'|"(?:\\.|[^"\\])*")\s*(?:#.*)?''', v)
+            if quoted:
+                value = quoted[1][1:-1]
+                if v[0] == "'":
+                    v = re.sub(r"\\([\\'])", r"\1", value)
+                else:
+                    escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+                    v = re.sub(r'''\\([\\'"abfnrtv])''', lambda m: escapes.get(m[1], m[1]), value)
             else:
                 v = v.split(" #", 1)[0].strip()
             found = v
@@ -102,12 +118,16 @@ def parse_pairs(pairs: List[str]) -> Dict[str, str]:
 
 
 def write_private(path: str, text: str) -> None:
-    tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    if os.name != "nt":
-        os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".envfile.", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def main(argv=None) -> int:
@@ -122,8 +142,7 @@ def main(argv=None) -> int:
     if a.has:
         if not exists:
             return 1
-        with open(a.env_path, encoding="utf-8-sig") as f:
-            return 0 if get_value(f.read(), a.has) else 1
+        return 0 if get_value(read_text(a.env_path), a.has) else 1
 
     try:
         values = parse_pairs(a.pairs)
@@ -134,11 +153,9 @@ def main(argv=None) -> int:
         return 2
 
     if exists:
-        with open(a.env_path, encoding="utf-8-sig") as f:
-            old = f.read()
+        old = read_text(a.env_path)
     elif a.example and os.path.isfile(a.example):
-        with open(a.example, encoding="utf-8-sig") as f:
-            old = f.read()
+        old = read_text(a.example)
     else:
         old = ""
     new = set_values(old, values) if values else old
@@ -146,11 +163,8 @@ def main(argv=None) -> int:
         print(f"{a.env_path}: unchanged")
         return 0
     if exists:
-        backup = f"{a.env_path}.bak.{int(time.time())}"
-        shutil.copy2(a.env_path, backup)
-        if os.name != "nt":
-            os.chmod(backup, 0o600)
-        print(f"{a.env_path}: backup {backup}")
+        saved = backup(a.env_path, private=True)
+        print(f"{a.env_path}: backup {saved}")
     write_private(a.env_path, new)
     print(f"{a.env_path}: {'updated' if exists else 'created'}; set {', '.join(values) or 'nothing'}")
     return 0

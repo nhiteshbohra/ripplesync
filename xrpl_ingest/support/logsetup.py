@@ -18,11 +18,18 @@ log = logging.getLogger(__name__)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _OURS = "_xrpl_ingest_handler"  # marks handlers we installed, so setup can be repeated
+_LOG_ESCAPES = str.maketrans({chr(n): ascii(chr(n))[1:-1]
+                            for n in (*range(32), *range(127, 160), 0x2028, 0x2029)})
 
 
 class UtcFormatter(logging.Formatter):
     """asctime = 2026-10-18T09:15:02.123Z (UTC)."""
     converter = time.gmtime
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Escape the whole event, including exception text and queued worker tracebacks.
+        # Handlers add the single physical newline; shared records remain unsanitized.
+        return super().format(record).translate(_LOG_ESCAPES)
 
     def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
         t = time.strftime("%Y-%m-%dT%H:%M:%S", self.converter(record.created))
