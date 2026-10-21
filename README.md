@@ -1561,11 +1561,20 @@ Created automatically.
 
 | Collection | Indexes |
 |---|---|
-| `block_number` (ledgers) | `block_number` (unique), `close_time` |
-| `transactions` | `hash` (unique), `block_number`, `from_address`, `to_address`, `TransactionType`, `close_time`, `affected_accounts` (multikey: one entry per account) |
+| `block_number` (ledgers) | `block_number` (unique) |
+| `transactions` | `hash` (unique), `block_number` |
 | `internal_data` (metadata) | `transaction_hash` (unique), `block_number` |
 | `failed_transactions` | `block_number` (unique) |
 | `last_processed_block_no` (progress) | `kind` + `start` |
+
+To remove retired indexes from an existing database, run
+`python -m xrpl_ingest.remove_indexes` using the same environment configuration as
+ingestion (`ENV_FILE`, `MONGO_URI`/`MONGO_URI_FILE`, and `DB_NAME`). The command checks
+every collection, drops only these exact names when present, logs each removal, and
+verifies they are absent: `from_address_1`, `kind_1_start_1_close_time_1`,
+`TransactionType_1`, `close_time_1`, `to_address_1`, `affected_accounts_1`.
+It preserves documents, collections, `_id_`, and all other indexes, including
+`kind_1_start_1` and `transaction_hash_1`. Startup no longer creates the retired indexes.
 
 Example queries in `mongosh`:
 

@@ -14,9 +14,35 @@ def test_indexes_created(store):
         assert coll.index_information()[name].get("unique") is True, (coll.name, name)
 
 
-def test_affected_accounts_multikey_index(store):
-    info = store.txs.index_information()["affected_accounts_1"]
-    assert info["key"] == [("affected_accounts", 1)] and not info.get("unique")
+def test_removed_indexes_stay_removed_after_restart(store, caplog):
+    from xrpl_ingest.remove_indexes import REMOVED_INDEXES, remove_indexes
+    from xrpl_ingest.store import MongoStore
+
+    db = store.ledgers.database
+    store.save_ledger_bundle(*bundle(1))
+    # Include an unexpected collection and protect a similar, unrequested name.
+    db.extra.insert_one({"block_number": 1})
+    for name in REMOVED_INDEXES:
+        db.extra.create_index("retired_field", name=name)
+    store.ledgers.create_index("close_time")
+    store.txs.create_index("from_address")
+    db.extra.create_index("keep_me")
+    documents = {n: list(db[n].find()) for n in db.list_collection_names()}
+    indexes = {n: db[n].index_information() for n in db.list_collection_names()}
+    with caplog.at_level("INFO", logger="xrpl_ingest.remove_indexes"):
+        removed = remove_indexes(db)
+    assert len(removed) == 8
+    for collection, name in removed:
+        assert f"Removed index {db.name}.{collection}.{name}" in caplog.text
+    assert remove_indexes(db) == []  # safe to run again
+    restarted = MongoStore(store.client, store.cfg)
+    restarted.ensure_indexes()
+    for n, before in indexes.items():
+        expected = {k: v for k, v in before.items() if k not in REMOVED_INDEXES}
+        assert db[n].index_information() == expected
+        assert list(db[n].find()) == documents[n]
+    restarted.save_ledger_bundle(*bundle(1))
+    assert store.txs.count_documents({}) == 2
 
 
 def test_new_tx_fields_roundtrip_and_query(store):

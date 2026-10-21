@@ -42,12 +42,8 @@ class MongoStore:
 
     def ensure_indexes(self) -> None:
         self.ledgers.create_index([("block_number", ASCENDING)], unique=True)
-        self.ledgers.create_index([("close_time", ASCENDING)])
         self.txs.create_index([("hash", ASCENDING)], unique=True, sparse=True)
-        for f in ("block_number", "from_address", "TransactionType", "close_time"):
-            self.txs.create_index([(f, ASCENDING)])
-        self.txs.create_index([("to_address", ASCENDING)], sparse=True)
-        self.txs.create_index([("affected_accounts", ASCENDING)])  # multikey (array field)
+        self.txs.create_index([("block_number", ASCENDING)])
         self.metas.create_index([("transaction_hash", ASCENDING)], unique=True, sparse=True)
         self.metas.create_index([("block_number", ASCENDING)])
         self.failed.create_index([("block_number", ASCENDING)], unique=True)
