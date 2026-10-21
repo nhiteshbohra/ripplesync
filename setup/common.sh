@@ -25,7 +25,7 @@ is_wsl()      { grep -qi microsoft /proc/version 2>/dev/null; }
 has_systemd() { [ -d /run/systemd/system ]; }
 
 # version_ge A B: true if dotted version A >= B.
-version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+version_ge() { awk -v a="$1" -v b="$2" 'BEGIN { n=split(a,x,"."); m=split(b,y,"."); for(i=1;i<=n || i<=m;i++) { if(x[i]+0>y[i]+0) exit 0; if(x[i]+0<y[i]+0) exit 1 } }'; }
 
 glibc_version() {
   local v
@@ -53,38 +53,116 @@ check_platform() {
 }
 
 python312_hint() {
-  echo "To get Python 3.12: Ubuntu 24.04 ships it (sudo apt-get install python3.12 python3.12-venv);" \
-       "on other releases use pyenv or uv, or the deadsnakes PPA (third-party, not from Canonical:" \
-       "sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt-get install python3.12 python3.12-venv)," \
-       "then re-run this script (python3.12 is used automatically when it is on PATH)."
+  echo "Manual options: uv python install 3.12; on macOS: brew install python@3.12." \
+       "On Ubuntu the deadsnakes PPA is a third-party manual option; it is never added automatically."
 }
 
-# pick_python: set PYTHON to python3.12 if on PATH, else python3; require >= 3.10.
-pick_python() {
+# Detection must not download Python or create a persistent uv cache, including under --check.
+find_python312() {
   local cand v
-  if command -v python3.12 >/dev/null 2>&1; then cand=python3.12; else cand=python3; fi
-  command -v "$cand" >/dev/null 2>&1 || die "$cand not found. $(python312_hint)"
-  v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])')" || die "cannot run $cand"
-  version_ge "$v" 3.10 || die "$cand is Python $v; xrpl_ingest needs Python >= 3.10 (3.12 recommended). $(python312_hint)"
-  [ "$v" = 3.12 ] || warn "$cand is Python $v: supported (>= 3.10), but 3.12 is the version this project targets. $(python312_hint)"
+  UV_BIN="$(command -v uv || true)"
+  [ -n "$UV_BIN" ] || UV_BIN="$HOME/.local/bin/uv"
+  for cand in "$(command -v python3.12 || true)" \
+      "$HOME"/.local/share/uv/python/cpython-3.12.*/bin/python3.12 \
+      "${PYENV_ROOT:-$HOME/.pyenv}/shims/python3.12" "${PYENV_ROOT:-$HOME/.pyenv}/shims/python3" \
+      "${PYENV_ROOT:-$HOME/.pyenv}"/versions/3.12.*/bin/python3.12 \
+      /opt/homebrew/opt/python@3.12/bin/python3.12 /usr/local/opt/python@3.12/bin/python3.12 \
+      "$REPO_DIR/.venv/bin/python" \
+      "$(command -v python3 || true)"; do
+    [ -x "$cand" ] || continue
+    v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || continue
+    if [ "$v" = 3.12 ]; then PYTHON="$cand"; return 0; fi
+  done
+  if [ -x "$UV_BIN" ]; then
+    cand="$(UV_NO_CACHE=1 UV_OFFLINE=1 "$UV_BIN" python find --no-python-downloads --system 3.12 2>/dev/null)" || return 1
+    v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || return 1
+    if [ "$v" = 3.12 ]; then PYTHON="$cand"; return 0; fi
+  fi
+  return 1
+}
+
+python312_method() {
+  if [ "$(uname -s)" = Darwin ] && command -v brew >/dev/null 2>&1; then
+    echo 'brew install python@3.12 (then uv if needed)'
+  elif command -v apt-get >/dev/null 2>&1 && command -v apt-cache >/dev/null 2>&1 && \
+      LC_ALL=C apt-cache policy python3.12 2>/dev/null | awk '$1=="Candidate:" && $2!="(none)" {found=1} END {exit !found}'; then
+    echo 'apt-get install -y python3.12 python3.12-venv (then uv if needed)'
+  else
+    echo 'uv python install 3.12 (install uv for this user if missing; no sudo)'
+  fi
+}
+
+install_python312() {
+  case "$1" in
+    apt-get*) $SUDO apt-get install -y python3.12 python3.12-venv && find_python312 && return 0 ;;
+    brew*) brew install python@3.12 && find_python312 && return 0 ;;
+  esac
+  if [ ! -x "$UV_BIN" ]; then
+    say "Installing uv for this user (https://astral.sh/uv/install.sh)"
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh || return 1
+    UV_BIN="$HOME/.local/bin/uv"
+  fi
+  "$UV_BIN" python install 3.12 && find_python312
+}
+
+# pick_python: prefer the tested interpreter; other versions require explicit opt-in.
+pick_python() {
+  local cand v=none method
+  if find_python312; then
+    "$PYTHON" --version
+    say "Python for .venv: $PYTHON (3.12)"
+    return 0
+  fi
+  cand="$(command -v python3 || true)"
+  if [ -n "$cand" ]; then
+    v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo none)"
+  fi
+  method="$(python312_method)"
+  if [ "${CHECK_ONLY:-0}" = 1 ]; then
+    echo "Python 3.12: missing, would be installed with $method"
+    return 0
+  fi
+  say "Detected Python $v. Python 3.12 is tested; Python 3.14 hangs one test. Install method: $method"
+  if ask "Install Python 3.12 now?" Y; then
+    if install_python312 "$method"; then
+      "$PYTHON" --version
+      say "Python for .venv: $PYTHON (3.12)"
+      return 0
+    fi
+    warn "Python 3.12 installation failed. $(python312_hint)"
+  fi
+  warn "Python $v is not the tested version; tests may hang (known on Python 3.14)."
+  [ "$v" != none ] && version_ge "$v" 3.10 || die "Python 3.12 was not installed and no Python >= 3.10 is available. $(python312_hint)"
+  ask "Continue with Python $v anyway (tests may hang)?" N || die "Python 3.12 is required unless you explicitly confirm the fallback"
   PYTHON="$cand"
   echo "Python for .venv: $PYTHON ($v)"
 }
 
 # make_venv: create $REPO_DIR/.venv with $PYTHON (pick_python first) and install requirements.txt.
 make_venv() {
-  local venv="$REPO_DIR/.venv" v
-  if [ -x "$venv/bin/python" ]; then
-    v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 0)"
-    version_ge "$v" 3.10 || die "existing $venv uses Python $v (< 3.10); remove it (rm -rf '$venv') and re-run"
-    say "Using existing $venv (Python $v)"
-  else
+  local venv="$REPO_DIR/.venv" v wanted backup
+  wanted="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  if [ -e "$venv" ] || [ -L "$venv" ]; then
+    v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
+    if [ "$v" != "$wanted" ]; then
+      warn "Existing $venv uses Python $v; selected Python $wanted."
+      ask "Back up .venv and recreate it with Python $wanted?" Y || die "Existing .venv left unchanged; cannot continue with the wrong interpreter"
+      backup="$(mktemp -d "$REPO_DIR/.venv-backup.XXXXXX")"
+      mv "$venv" "$backup/.venv" || die "could not back up .venv to $backup"
+      say "Previous .venv saved in $backup/.venv (move it back before using it)"
+    else
+      say "Using existing $venv (Python $v)"
+    fi
+  fi
+  if [ ! -x "$venv/bin/python" ]; then
     say "Creating $venv with $PYTHON"
     "$PYTHON" -m venv "$venv" || die "venv creation failed; install the venv package: sudo apt-get install $(basename "$PYTHON")-venv"
   fi
+  v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  [ "$v" = "$wanted" ] || die "$venv uses Python $v instead of $wanted"
   # Skip pip when requirements.txt has not changed since the last successful install.
   local stamp="$venv/.requirements.sha256" want
-  want="$(sha256sum "$REPO_DIR/requirements.txt" | cut -d' ' -f1)"
+  want="$("$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$REPO_DIR/requirements.txt")"
   if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && "$venv/bin/python" -m pip check >/dev/null 2>&1; then
     say "Python packages already installed (requirements.txt unchanged)"
     return 0

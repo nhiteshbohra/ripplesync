@@ -62,13 +62,38 @@ First pick **what** you want to run, then **how** you want to install it.
 |---|---|---|
 | Ubuntu 20.04+ / Debian 11+ (also WSL2) | `bash install.sh`: see [Automatic setup: Linux](#automatic-setup-linux-ubuntu--debian--wsl2) | [Manual setup](#manual-setup) |
 | Windows 10 / 11 | double-click `install.cmd`: see [Automatic setup: Windows](#automatic-setup-windows-10--11) | [Manual setup](#manual-setup) |
-| macOS, RHEL / Rocky / Alma | no installer | [Manual setup](#manual-setup) |
+| macOS | `bash install.sh`: Python environment only (Homebrew, else uv); MongoDB and node setup are manual | [Manual setup](#manual-setup) |
+| RHEL / Rocky / Alma | no installer | [Manual setup](#manual-setup) |
 
 Automatic and manual do the **same steps**. The installers first show what they found and what they will change, and ask before they change anything. You can run them again at any time; that is safe.
 
 ---
 
 ## Automatic setup
+
+### Python version
+
+**Python 3.12 is the tested version.** Python 3.10+ may run, but Python 3.14 is known
+to hang `test_pool_worker_death_stops_backfill_and_counts_lost_chunks`.
+
+The installer looks for 3.12 on PATH, in uv's Python directory and pyenv, then asks
+`Install Python 3.12 now? [Y/n]` if it is missing. Enter means yes. On Linux it uses
+apt when a 3.12 candidate is available, otherwise uv (including Ubuntu releases
+that do not package 3.12). On macOS it tries Homebrew first, otherwise uv. The uv
+installation is per user and does not replace system Python. The installer never
+adds a third-party PPA automatically.
+
+`--yes` accepts installation and backs up an incompatible `.venv` before rebuilding
+it. `--check` only reports what would happen and changes nothing. If installing
+3.12 is declined or fails, using another Python >= 3.10 requires a separate explicit
+confirmation; unattended runs stop instead of accepting that fallback. An existing
+3.12 `.venv` is reused. Windows also uses `py -3.12` and offers to back up and rebuild
+an incompatible `.venv`.
+
+For manual commands, see [Create and use the virtual environment](#53-create-and-use-the-virtual-environment).
+
+Installer self-check: `bash setup/check_python.sh` exercises the Python choices and
+venv replacement using stubs; it does not install Python or modify your services.
 
 ### Get the code
 
@@ -209,23 +234,23 @@ You do not need a server, a node or 39 TB to see the program work. On a normal l
 
 | Level | What you need | What it proves | Time |
 |---|---|---|---|
-| **1. Tests only** | Python 3.10+ and the code | The code works on this computer: all commands, retries, stop, lock, lossless storage, against a fake node and an in-memory database | ~5 minutes |
+| **1. Tests only** | Python 3.12 (tested) and the code | The code works on this computer: all commands, retries, stop, lock, lossless storage, against a fake node and an in-memory database | ~5 minutes |
 | **2. Tests + local MongoDB** | Level 1 + MongoDB installed on this computer | The whole backfill path end to end: real worker processes, real websockets (fake node), real MongoDB | +15 minutes |
 | **3. Real XRPL data, small amount** | Level 2 + internet | Real mainnet ledgers go into your MongoDB: `fetch`, `backfill`, `verify`, `tx`, `tail`, `status`, `health` | +15 minutes |
 
-What a small computer is enough for: Python 3.10 or newer, about 2 GB free disk, any normal RAM. MongoDB 8.0 on an x86_64 CPU needs AVX support (most CPUs from 2011 on).
+What a small computer is enough for: Python 3.12 (3.10+ may run; 3.14 has a known test hang), about 2 GB free disk, any normal RAM. MongoDB 8.0 on an x86_64 CPU needs AVX support (most CPUs from 2011 on).
 Do **not** run a full-history backfill this way. That needs the server in [Requirements](#requirements).
 
 ### Level 1: tests only (no node, no MongoDB)
 
-Get the code and install it (details in [Step 5.2](#52-get-the-code) and [Step 5.3](#53-create-a-virtual-environment-and-install)):
+Get the code and install it (details in [Step 5.2](#52-get-the-code) and [Step 5.3](#53-create-and-use-the-virtual-environment)):
 
 Linux / macOS / WSL:
 
 ```bash
 git clone https://github.com/nhiteshbohra/ripplesync.git
 cd ripplesync
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 XRPL_INGEST_NO_INTEGRATION=1 python -m pytest -q
@@ -366,7 +391,7 @@ The number of ledgers is large: xrpl.org listed "81,000,000+" ledgers for full h
 |---|---|---|
 | xrpld | **3.4.x** (latest release 3.4.1, 2026-10-10) | `rippled` was renamed `xrpld` in 3.2.0. Old guides say `rippled`. |
 | MongoDB | **7.0 or 8.0** | **Not 9.0.** Our pinned driver (`pymongo>=4.9,<4.11`) fully supports 7.0 and 8.0. MongoDB 9.0 needs pymongo 4.17 or newer (4.18 for full support) ([driver compatibility](https://www.mongodb.com/docs/drivers/compatibility/?driver-language=python&python-driver-framework=pymongo)). The cap `<4.11` exists because the test library `mongomock` breaks on newer pymongo. 7.0 ends support 2027-08-31, 8.0 ends 2029-10-31. **Use 8.0 for new installs.** `doctor` warns if the server is not 7.0 or 8.0. |
-| Python | **3.10 or newer** | 3.12 is the tested and recommended version. |
+| Python | **3.12 (tested)** | 3.10+ may run; 3.14 is known to hang one test. The installer offers to install 3.12. |
 | Python packages | from `requirements.txt` only | `pymongo`, `websockets`, `python-dotenv`, plus `pytest`, `mongomock` for tests. |
 
 ---
@@ -868,15 +893,15 @@ Alternative: put the whole URI into a file and set `MONGO_URI_FILE` (see [Step 5
 
 ## Step 5: Install this program
 
-The program runs on Linux, macOS and Windows. It needs Python 3.10 or newer (3.12 tested).
+The program runs on Linux, macOS and Windows. Use Python 3.12 (tested). Python 3.10+ may run, but 3.14 is known to hang one test.
 
 ### 5.1 Get Python
 
 | OS | Command |
 |---|---|
-| Ubuntu / Debian | `sudo apt-get install -y python3 python3-venv python3-pip`. Ubuntu 24.04 ships 3.12 (`python3.12 python3.12-venv`). `install.sh` uses `python3.12` when it is on PATH, else `python3` (must be 3.10+). |
+| Ubuntu / Debian | `bash install.sh` detects 3.12 or offers to install it: apt (`python3.12 python3.12-venv`) when available, otherwise uv. Other versions require explicit confirmation. |
 | RHEL / Rocky / Alma 9 | `sudo dnf install -y python3.12 python3.12-pip` (**UNVERIFIED** package names; `python3` 3.9 of RHEL 9 is too old) |
-| macOS | `brew install python@3.12` |
+| macOS | `bash install.sh` sets up Python and `.venv` only: `brew install python@3.12` if Homebrew exists, otherwise uv. |
 | Windows | The installer from [python.org](https://www.python.org/downloads/windows/) (keep "py launcher" ticked), or `winget install Python.Python.3.12`. `install.cmd` installs Python 3.12 with winget if it is missing. |
 
 Note: for Python 3.12 the last Windows/macOS installer from python.org is 3.12.10. Newer 3.12 releases are source only. Python 3.13 should also work (not tested).
@@ -940,17 +965,34 @@ A ZIP has no git history and no `git pull`: to update, download a new ZIP and co
 
 All commands in this guide are run from inside this folder (`ripplesync`, or `ripplesync-main` for the ZIP).
 
-### 5.3 Create a virtual environment and install
+### 5.3 Create and use the virtual environment
 
 A virtual environment (venv) keeps this program's packages apart from the system Python.
 
 Linux / macOS (bash or zsh):
 
 ```bash
-python3 -m venv .venv
+python3.12 --version
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+python --version                 # must say 3.12.x
+python -m xrpl_ingest doctor
+python -m xrpl_ingest status
+```
+
+`doctor` and `status` use your `.env`; configure MongoDB and the node as described
+in [Step 5.5](#55-settings-explained) before expecting those checks to pass.
+
+With uv instead (install uv first using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/)):
+
+```bash
+uv python install 3.12
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+python --version                 # must say 3.12.x
 ```
 
 Windows: `install.cmd` does 5.3 and 5.4 for you (see [Automatic setup: Windows](#automatic-setup-windows-10--11)). By hand, in Windows PowerShell:
@@ -975,6 +1017,19 @@ pip install -r requirements.txt
 
 `requirements.txt` is the only install file. It contains the runtime and the test packages.
 There is no installable package and no short command: always run the program as `python -m xrpl_ingest ...` with the venv active (or with `.venv/bin/python`, `.venv\Scripts\python.exe`).
+
+Activate the venv again in every new terminal (`source .venv/bin/activate` on
+Linux/macOS, `.\.venv\Scripts\Activate.ps1` in PowerShell). With `.env` configured:
+
+```bash
+python -m xrpl_ingest tail
+python -m xrpl_ingest backfill --start N --end M
+python -m xrpl_ingest verify --start N --end M
+python -m xrpl_ingest status
+```
+
+Replace `N` and `M` with ledger numbers available on your node. Stop `tail` with
+Ctrl+C. Leave the venv with `deactivate`.
 
 On Ubuntu / Debian, `bash install.sh` does 5.3 and 5.4 for you: venv, requirements, `.env` (chmod 600; it asks for `MONGO_URI` with hidden input if no local MongoDB is found), the tests, `doctor`, and for `node` / `server` the two systemd units (see [Step 7](#step-7-run-as-a-service)).
 
@@ -1567,14 +1622,9 @@ Created automatically.
 | `failed_transactions` | `block_number` (unique) |
 | `last_processed_block_no` (progress) | `kind` + `start` |
 
-To remove retired indexes from an existing database, run
-`python -m xrpl_ingest.remove_indexes` using the same environment configuration as
-ingestion (`ENV_FILE`, `MONGO_URI`/`MONGO_URI_FILE`, and `DB_NAME`). The command checks
-every collection, drops only these exact names when present, logs each removal, and
-verifies they are absent: `from_address_1`, `kind_1_start_1_close_time_1`,
-`TransactionType_1`, `close_time_1`, `to_address_1`, `affected_accounts_1`.
-It preserves documents, collections, `_id_`, and all other indexes, including
-`kind_1_start_1` and `transaction_hash_1`. Startup no longer creates the retired indexes.
+Startup does not create the retired address, transaction type, close time, or
+`kind_1_start_1_close_time_1` indexes. The separate `kind_1_start_1` and
+`transaction_hash_1` indexes are preserved.
 
 Example queries in `mongosh`:
 
@@ -1667,7 +1717,7 @@ Suggestion: run `verify` over the whole stored range once a week, and always aft
 | xrpld stops a second after it starts (`status=255/EXCEPTION`, last log line "Manifest counts", then "Start request repeated too quickly") | A config error, most often a wrong validator list key (typed by hand) or validator settings copied into `xrpld.cfg` | The real reason is only in xrpld's own log: `sudo tail -n 40 /var/log/xrpld/debug.log`. Check the validators: `sudo python3 setup/xrpld_check.py check`. Restore the official settings (backups kept): `sudo python3 setup/xrpld_check.py fix`, then `sudo systemctl reset-failed xrpld && sudo systemctl restart xrpld`. |
 | Installer: "run this script WITHOUT sudo" | Started as `sudo bash install.sh` | Run `bash install.sh`. It asks for sudo itself; as root, `.venv` and `.env` would belong to root. |
 | Installer stops at a hardware check (RAM, cores, disk) | This computer is below what that setup needs (`server`: 64 GB RAM, ~39 TB; `test`: at least 8 GB RAM and 10 GB free disk) | Use `--mode test` for `server` problems, or `FORCE=1 bash install.sh ...` if you know what you are doing. |
-| Installer seems stuck at "Running the test suite" | A test hangs (seen on Ubuntu 26.04 with Python 3.14 before the fix in `backfill.py`) | Wait: after `TEST_TIMEOUT_MIN` (10) minutes the installer stops the tests itself and asks whether to continue. Every test name is printed, so you see where it stops; the full output with the stuck line is in `logs/install-tests.log`. Or press Ctrl+C and run `bash install.sh --skip-tests`. |
+| Installer seems stuck at "Running the test suite" | Python 3.14 is known to hang one test | Use Python 3.12: rerun the installer and accept installation and rebuilding `.venv`. The Linux test timeout remains `TEST_TIMEOUT_MIN` (10) minutes; output is in `logs/install-tests.log`. |
 | `test`: "the node is not synced yet" after 30 minutes | A new node needs time; with 8 GB RAM or a slow disk it can take longer | Normal. Run the checks later: `bash install.sh --trial`. Watch it: `bash setup/check_node.sh`. |
 | `test`: backfill exits `3` "node does not have ledgers" | The small node keeps only the last ~2 hours | Use a range inside `node complete_ledgers` from `python -m xrpl_ingest status`. |
 | Windows installer: `winget` not found | Old Windows without "App Installer" | Install "App Installer" from the Microsoft Store, or install Python 3.12 and MongoDB 8.0 by hand (Steps 4.4 and 5.1). |

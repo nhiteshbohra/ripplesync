@@ -85,14 +85,14 @@ function Update-PathFromRegistry {
     $env:Path = "$m;$u"
 }
 
-# Python >= 3.10 through the py launcher; 3.12 preferred. Returns @(exe, args, version) or $null.
+# Tested Python 3.12 through the py launcher. Returns @(exe, args, version) or $null.
 function Find-Python {
     if (-not (Get-Command py -ErrorAction SilentlyContinue)) { return $null }
-    foreach ($tag in @('-3.12', '-3')) {
+    foreach ($tag in @('-3.12')) {
         $v = Get-NativeOutput 'py' @($tag, '-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))')
         if ($v) {
             $parts = $v.Split('.')
-            if ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 10) { return @('py', $tag, $v) }
+            if ([int]$parts[0] -eq 3 -and [int]$parts[1] -eq 12) { return @('py', $tag, $v) }
         }
     }
     return $null
@@ -111,7 +111,7 @@ $py = Find-Python
 $mongoSvc = Get-Service -Name 'MongoDB' -ErrorAction SilentlyContinue
 $mongoUp = Test-Port '127.0.0.1' 27017
 $mongoState = if ($mongoUp) { 'running on 127.0.0.1:27017' } elseif ($mongoSvc) { "installed (service $($mongoSvc.Status))" } else { 'not installed' }
-$pyState = if ($py) { "Python $($py[2]) (py $($py[1]))" } else { 'not found (3.10+ needed)' }
+$pyState = if ($py) { "Python $($py[2]) (py $($py[1]))" } else { 'Python 3.12 not found' }
 $envState = if (Test-Path -LiteralPath (Join-Path $repo '.env')) { 'exists' } else { 'none' }
 $venvState = if (Test-Path -LiteralPath $venvPy) { 'exists' } else { 'none' }
 
@@ -166,7 +166,7 @@ if (-not (Ask 'Continue?' $true)) { Write-Host 'Nothing changed.'; exit 0 }
 
 # ---------------------------------------------------------------------------------- 2. Python
 if (-not $py) {
-    if (-not $winget) { Fail 'Python 3.10+ is missing and winget is not available. Install Python 3.12 from https://www.python.org/downloads/windows/ (keep "py launcher" ticked), then run install.cmd again.' }
+    if (-not $winget) { Fail 'Python 3.12 is missing and winget is not available. Install Python 3.12 from https://www.python.org/downloads/windows/ (keep "py launcher" ticked), then run install.cmd again.' }
     Say 'Installing Python 3.12 with winget'
     $rc = Invoke-Native 'winget' @('install', '--id', 'Python.Python.3.12', '--exact', '--accept-package-agreements', '--accept-source-agreements')
     Update-PathFromRegistry
@@ -201,12 +201,24 @@ $mongoUp = Test-Port '127.0.0.1' 27017
 if ($mongoUp) { Ok 'MongoDB is running on 127.0.0.1:27017' } else { Warn 'MongoDB is not reachable on 127.0.0.1:27017 yet; you can set MONGO_URI in .env to another MongoDB' }
 
 # ---------------------------------------------------------------------------------- 4. .venv
-if (Test-Path -LiteralPath $venvPy) { Say 'Using the existing .venv' }
-else {
+if (Test-Path -LiteralPath (Join-Path $repo '.venv')) {
+    $venvVersion = Get-NativeOutput $venvPy @('-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))')
+    if ($venvVersion -ne '3.12') {
+        Warn "Existing .venv uses Python '$venvVersion'; Python 3.12 is the tested version."
+        if (-not (Ask 'Back up .venv and recreate it with Python 3.12?' $true)) { Fail 'Existing .venv left unchanged; Python 3.12 is required.' }
+        $backup = Join-Path $repo ('.venv-backup.' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $backup
+        $backupVenv = Join-Path $backup '.venv'
+        Move-Item -LiteralPath (Join-Path $repo '.venv') -Destination $backupVenv
+        Say "Previous .venv saved in $backupVenv (move it back before using it)"
+    } else { Say 'Using the existing .venv (Python 3.12)' }
+}
+if (-not (Test-Path -LiteralPath $venvPy)) {
     Say 'Creating .venv'
     $rc = Invoke-Native $py[0] @($py[1], '-m', 'venv', (Join-Path $repo '.venv'))
     if ($rc -ne 0) { Fail "creating .venv failed (exit $rc)" }
 }
+if ((Get-NativeOutput $venvPy @('-c', 'import sys; print(sys.version_info[0], sys.version_info[1], sep=chr(46))')) -ne '3.12') { Fail '.venv is not using Python 3.12' }
 Say 'Installing the Python packages (requirements.txt)'
 $null = Invoke-Native $venvPy @('-m', 'pip', 'install', '-q', '--upgrade', 'pip')
 $rc = Invoke-Native $venvPy @('-m', 'pip', 'install', '-q', '-r', (Join-Path $repo 'requirements.txt'))

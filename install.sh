@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Automatic setup for Linux: Ubuntu 20.04+ / Debian 11+ on x86_64 (also inside WSL2).
+# macOS: Python 3.12 and .venv only; node and MongoDB setup remain manual.
 #
 # Two setups, both with your own xrpld node and the same program, settings and services:
 #   test    the server setup in small: a small node that keeps only recent ledgers (about 2 hours,
@@ -272,7 +273,6 @@ step_node() {
 }
 
 step_python() {
-  pick_python
   make_venv
   ok "Python environment ready: $REPO_DIR/.venv"
 }
@@ -408,8 +408,26 @@ EOF
 }
 
 # ------------------------------------------------------------------------------ main
-[ "$(uname -s)" = Linux ] || die "this installer is for Linux. Windows: run install.cmd. Others: see README.md 'Manual setup'"
+case "$(uname -s)" in
+  Darwin)
+    [ "$TRIAL_ONLY" = 0 ] && [ -z "$MODE" ] || die "--mode and --trial need the Linux node setup; on macOS omit them"
+    say "macOS: Python environment only; see README.md for MongoDB and node setup"
+    pick_python
+    [ "$CHECK_ONLY" = 0 ] || { echo "(--check: nothing was changed)"; exit 0; }
+    step_python
+    echo "Activate with: source .venv/bin/activate; then run: python -m pytest -v"
+    exit 0 ;;
+  Linux) ;;
+  *) die "Windows: run install.cmd. Other systems: see README.md 'Manual setup'" ;;
+esac
 detect
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  report
+  pick_python
+  echo "(--check: nothing was changed)"
+  exit 0
+fi
 
 if [ "$TRIAL_ONLY" = 1 ]; then
   [ "$VENV_STATE" = exists ] && [ "$ENV_STATE" = exists ] || die "--trial needs a finished test setup (run: bash install.sh --mode test)"
@@ -419,10 +437,6 @@ if [ "$TRIAL_ONLY" = 1 ]; then
 fi
 
 report
-if [ "$CHECK_ONLY" = 1 ]; then
-  echo "(--check: nothing was changed)"
-  exit 0
-fi
 [ "$APT" = yes ] || die "this installer needs apt (Ubuntu / Debian). On other Linux systems follow README.md 'Manual setup'"
 
 if [ -z "$MODE" ]; then
@@ -448,6 +462,7 @@ echo "  - install the services xrpl-tail / xrpl-backfill (not started)"
 [ "$MODE" = server ] || echo "  - wait for the node, then check that real data arrives (tail, backfill, verify)"
 ask "Continue?" Y || { echo "Nothing changed."; exit 0; }
 
+pick_python
 step_base_packages
 step_mongodb
 step_node "$MODE"
