@@ -21,7 +21,7 @@ from .errors import IngestError, TransientError
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 from .ledger_ranges import Range, parse_complete_ledgers, plan_chunks
 from .support.logsetup import (ChunkProgress, setup_logging, setup_worker_logging,
-                       start_queue_listener)
+                       start_queue_listener, stop_queue_listener)
 from .source import WsSource
 from .support.runcontrol import StopFlag, any_of, ignore_sigint, install_stop_signal, stop_signalled
 from .store import MongoStore
@@ -223,68 +223,96 @@ def _run_pool(cfg: Config, chunks: List[Range], results: List[ChunkResult], t0: 
     log_queue = ctx.Queue()
     listener = start_queue_listener(log_queue)
     stopping = False
+    pool = ProcessPoolExecutor(max_workers=cfg.num_processes, mp_context=ctx,
+                               initializer=_init_worker,
+                               initargs=(stop_event, log_queue, cfg.log_level))
+    clean = False  # True: every worker is healthy, so a normal (waiting) shutdown is safe
     try:
-        with ProcessPoolExecutor(max_workers=cfg.num_processes, mp_context=ctx,
-                                 initializer=_init_worker,
-                                 initargs=(stop_event, log_queue, cfg.log_level)) as pool:
-            def submit(n: int) -> Set[Future]:
-                return {pool.submit(_run_chunk_in_process, (cfg, c)) for c in islice(todo, n)}
+        def submit(n: int) -> Set[Future]:
+            return {pool.submit(_run_chunk_in_process, (cfg, c)) for c in islice(todo, n)}
 
-            def check_stop() -> bool:
-                nonlocal stopping
-                if not stopping and (stop_signalled() or stop_check()):
-                    stopping = True
-                    stop_event.set()
-                    log.warning("backfill stopping: in-flight chunks finish their current "
-                                "ledgers, no new chunk starts")
-                return stopping
+        def check_stop() -> bool:
+            nonlocal stopping
+            if not stopping and (stop_signalled() or stop_check()):
+                stopping = True
+                stop_event.set()
+                log.warning("backfill stopping: in-flight chunks finish their current "
+                            "ledgers, no new chunk starts")
+            return stopping
 
-            pending = set() if check_stop() else submit(cfg.num_processes)
-            try:
-                while pending:
-                    done, pending = wait(pending, timeout=POLL_SECONDS,
-                                         return_when=FIRST_COMPLETED)
-                    broken: Optional[BrokenProcessPool] = None
-                    for fut in done:  # collect every finished chunk before reacting to a dead worker
-                        try:
-                            r = fut.result()
-                        except BrokenProcessPool as e:
-                            broken = e
-                            continue
-                        results.append(r)
-                        _log_chunk(r, t0, progress)
-                        if not r.completed and not stopping:
-                            stopping = True
-                            stop_event.set()
-                    if broken is not None:
-                        raise broken
-                    if not check_stop() and done:
-                        pending |= submit(len(done))
-            except BrokenProcessPool as e:
-                lost = len(chunks) - len(results)
-                log.error("a backfill worker process died (%s); stopping with %d chunks unfinished "
-                          "(not marked done; rerun backfill to redo them)", e, lost)
-                return lost
-            except KeyboardInterrupt:
-                log.warning("aborting backfill now: terminating worker processes (unfinished "
-                            "chunks are not marked done; rerun backfill to redo them)")
-                _terminate(pool)
-                raise
+        pending = set() if check_stop() else submit(cfg.num_processes)
+        try:
+            while pending:
+                done, pending = wait(pending, timeout=POLL_SECONDS,
+                                     return_when=FIRST_COMPLETED)
+                broken: Optional[BrokenProcessPool] = None
+                for fut in done:  # collect every finished chunk before reacting to a dead worker
+                    try:
+                        r = fut.result()
+                    except BrokenProcessPool as e:
+                        broken = e
+                        continue
+                    results.append(r)
+                    _log_chunk(r, t0, progress)
+                    if not r.completed and not stopping:
+                        stopping = True
+                        stop_event.set()
+                if broken is not None:
+                    raise broken
+                if pending and not done:
+                    # Our own check: on Linux a killed worker has been seen to leave its
+                    # future pending forever instead of breaking the pool.
+                    dead = _dead_worker(pool)
+                    if dead is not None:
+                        raise BrokenProcessPool(f"worker process {dead[0]} exited with code {dead[1]}")
+                if not check_stop() and done:
+                    pending |= submit(len(done))
+            clean = True
+        except BrokenProcessPool as e:
+            lost = len(chunks) - len(results)
+            log.error("a backfill worker process died (%s); stopping with %d chunks unfinished "
+                      "(not marked done; rerun backfill to redo them)", e, lost)
+            return lost
+        except KeyboardInterrupt:
+            log.warning("aborting backfill now: terminating worker processes (unfinished "
+                        "chunks are not marked done; rerun backfill to redo them)")
+            raise
     finally:
-        listener.stop()
+        if clean:
+            pool.shutdown(wait=True)
+        else:  # a dead or interrupted worker: never wait for a pool that may not finish
+            _terminate(pool)
+        stop_queue_listener(listener)
         log_queue.close()
+        log_queue.cancel_join_thread()  # exit even if a dead worker left the queue locked
     # stopped: in-flight chunks may all have completed, but the never-started ones still
     # count as unfinished, so the exit code says "stopped early"
     return len(chunks) - len(results) if stopping else 0
 
 
-def _terminate(pool: ProcessPoolExecutor) -> None:
-    """Hard stop: cancel queued chunks and kill the workers (private API, best effort)."""
-    pool.shutdown(wait=False, cancel_futures=True)
+def _dead_worker(pool: ProcessPoolExecutor) -> Optional[Tuple[int, int]]:
+    """(pid, exit code) of a pool worker that has exited, else None (private API, best effort).
+
+    Pool workers only exit at shutdown, so any exit code while chunks are pending means the
+    worker died (OOM kill, os._exit, crash)."""
     for proc in list((getattr(pool, "_processes", None) or {}).values()):
         try:
+            code = proc.exitcode
+        except (OSError, AttributeError, ValueError):
+            continue
+        if code is not None:
+            return proc.pid, code
+    return None
+
+
+def _terminate(pool: ProcessPoolExecutor) -> None:
+    """Hard stop: cancel queued chunks and kill the workers (private API, best effort)."""
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for proc in procs:
+        try:
             proc.terminate()
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, ValueError):
             pass
 
 

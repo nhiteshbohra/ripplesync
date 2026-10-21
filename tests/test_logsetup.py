@@ -71,6 +71,21 @@ def test_worker_records_reach_parent_handlers_through_queue(restore_logging):
     assert "WARNING xrpl_ingest.source: from worker" in out and "hidden" not in out
 
 
+def test_stop_queue_listener_normal_and_stuck(restore_logging, caplog):
+    q = queue.Queue()
+    listener = logsetup.start_queue_listener(q)
+    assert logsetup.stop_queue_listener(listener, timeout=5) is True
+
+    class NeverDelivers(queue.Queue):  # like a queue whose write lock a killed worker holds
+        def put_nowait(self, item):
+            pass
+
+    stuck = logsetup.start_queue_listener(NeverDelivers())
+    with caplog.at_level("WARNING", logger="xrpl_ingest.support.logsetup"):
+        assert logsetup.stop_queue_listener(stuck, timeout=0.2) is False  # returns instead of hanging
+    assert "did not stop within" in caplog.text
+
+
 def test_setup_worker_logging_sends_everything_to_queue(restore_logging):
     q = queue.Queue()
     logsetup.setup_worker_logging(q, "INFO")

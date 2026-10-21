@@ -79,6 +79,28 @@ def start_queue_listener(queue: Any) -> logging.handlers.QueueListener:
     return listener
 
 
+def stop_queue_listener(listener: logging.handlers.QueueListener, timeout: float = 5.0) -> bool:
+    """QueueListener.stop() that gives up after `timeout` seconds instead of waiting forever.
+
+    On Linux a multiprocessing queue has a write lock shared by all processes; a worker that
+    is killed while it holds it (OOM kill) leaves the stop sentinel undeliverable, and the
+    plain stop() would hang. The listener thread is a daemon, so leaving it does not block exit.
+    Returns True if the listener stopped in time."""
+    thread = getattr(listener, "_thread", None)
+    try:
+        listener.enqueue_sentinel()
+    except Exception as e:  # noqa: BLE001  best effort: a broken queue must not stop the caller
+        log.warning("log queue: cannot send the stop marker: %s", e)
+    stopped = True
+    if thread is not None:
+        thread.join(timeout)
+        stopped = not thread.is_alive()
+        if not stopped:
+            log.warning("log queue listener did not stop within %.0fs; continuing without it", timeout)
+    listener._thread = None  # type: ignore[attr-defined]  (what QueueListener.stop() does too)
+    return stopped
+
+
 def setup_worker_logging(queue: Any, level: str) -> None:
     """In a pool worker: every record goes to the parent through `queue`."""
     root = logging.getLogger()

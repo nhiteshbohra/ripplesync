@@ -127,10 +127,11 @@ Options:
 | `bash install.sh --mode test` | Test setup (server in small), without the question |
 | `bash install.sh --mode server` | Full-history server, without the question |
 | `bash install.sh --trial` | Test setup only: run the real-data checks again (waits for the node first) |
+| `bash install.sh --skip-tests` | Everything except the test suite (for example after a stuck test) |
 | add `--yes` | Accept every default, no questions |
 
 You can also give settings in front of the command, for example `DB_PATH=/data/xrpld/db/nudb bash install.sh --mode server`:
-`MONGO_URI=...` (MongoDB to use), `DB_PATH=...` (folder for the node database; default `/var/lib/xrpld/db/nudb`), `NODE_SIZE=small|medium|huge` (default: `test` from the RAM, `server` huge), `FIXED_PEERS="host port;host port"` (peers with full history), `SYNC_WAIT_MIN=30` (`test`: minutes to wait for the node before the checks), `FORCE=1` (continue when a hardware check fails).
+`MONGO_URI=...` (MongoDB to use), `DB_PATH=...` (folder for the node database; default `/var/lib/xrpld/db/nudb`), `NODE_SIZE=small|medium|huge` (default: `test` from the RAM, `server` huge), `FIXED_PEERS="host port;host port"` (peers with full history), `SYNC_WAIT_MIN=30` (`test`: minutes to wait for the node before the checks), `TEST_TIMEOUT_MIN=10` (the test suite normally needs about 1 minute; after this many minutes it is stopped, and the installer asks whether to continue), `FORCE=1` (continue when a hardware check fails).
 
 If xrpld does not keep running, the installer prints the reason from xrpld's own log (`/var/log/xrpld/debug.log`) and checks the validator settings. See [Troubleshooting](#troubleshooting), fix it, and run the installer again.
 
@@ -1657,6 +1658,7 @@ Suggestion: run `verify` over the whole stored range once a week, and always aft
 | xrpld stops a second after it starts (`status=255/EXCEPTION`, last log line "Manifest counts", then "Start request repeated too quickly") | A config error, most often a wrong validator list key (typed by hand) or validator settings copied into `xrpld.cfg` | The real reason is only in xrpld's own log: `sudo tail -n 40 /var/log/xrpld/debug.log`. Check the validators: `sudo python3 setup/xrpld_check.py check`. Restore the official settings (backups kept): `sudo python3 setup/xrpld_check.py fix`, then `sudo systemctl reset-failed xrpld && sudo systemctl restart xrpld`. |
 | Installer: "run this script WITHOUT sudo" | Started as `sudo bash install.sh` | Run `bash install.sh`. It asks for sudo itself; as root, `.venv` and `.env` would belong to root. |
 | Installer stops at a hardware check (RAM, cores, disk) | This computer is below what that setup needs (`server`: 64 GB RAM, ~39 TB; `test`: at least 8 GB RAM and 10 GB free disk) | Use `--mode test` for `server` problems, or `FORCE=1 bash install.sh ...` if you know what you are doing. |
+| Installer seems stuck at "Running the test suite" | A test hangs (seen on Ubuntu 26.04 with Python 3.14 before the fix in `backfill.py`) | Wait: after `TEST_TIMEOUT_MIN` (10) minutes the installer stops the tests itself and asks whether to continue. Every test name is printed, so you see where it stops; the full output with the stuck line is in `logs/install-tests.log`. Or press Ctrl+C and run `bash install.sh --skip-tests`. |
 | `test`: "the node is not synced yet" after 30 minutes | A new node needs time; with 8 GB RAM or a slow disk it can take longer | Normal. Run the checks later: `bash install.sh --trial`. Watch it: `bash setup/check_node.sh`. |
 | `test`: backfill exits `3` "node does not have ledgers" | The small node keeps only the last ~2 hours | Use a range inside `node complete_ledgers` from `python -m xrpl_ingest status`. |
 | Windows installer: `winget` not found | Old Windows without "App Installer" | Install "App Installer" from the Microsoft Store, or install Python 3.12 and MongoDB 8.0 by hand (Steps 4.4 and 5.1). |

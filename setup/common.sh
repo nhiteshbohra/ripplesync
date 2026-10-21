@@ -82,8 +82,16 @@ make_venv() {
     say "Creating $venv with $PYTHON"
     "$PYTHON" -m venv "$venv" || die "venv creation failed; install the venv package: sudo apt-get install $(basename "$PYTHON")-venv"
   fi
+  # Skip pip when requirements.txt has not changed since the last successful install.
+  local stamp="$venv/.requirements.sha256" want
+  want="$(sha256sum "$REPO_DIR/requirements.txt" | cut -d' ' -f1)"
+  if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && "$venv/bin/python" -m pip check >/dev/null 2>&1; then
+    say "Python packages already installed (requirements.txt unchanged)"
+    return 0
+  fi
   "$venv/bin/python" -m pip install -q --upgrade pip
   "$venv/bin/python" -m pip install -q -r "$REPO_DIR/requirements.txt"
+  printf '%s\n' "$want" >"$stamp"
 }
 
 # print_key_fprs FILE: primary-key fingerprint of every key in FILE, one per line.

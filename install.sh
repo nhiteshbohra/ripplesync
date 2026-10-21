@@ -16,6 +16,7 @@
 #   bash install.sh --mode test      # test setup without the question
 #   bash install.sh --mode server    # server setup without the question
 #   bash install.sh --trial          # test setup only: run the real-data checks again
+#   bash install.sh --skip-tests     # do everything except the test suite
 #   add --yes to accept every default without questions
 #
 # Settings you can pass in the environment:
@@ -24,6 +25,7 @@
 #   NODE_SIZE=small|medium|huge      xrpld [node_size]       [test: from the RAM; server: huge]
 #   FIXED_PEERS="host port;host port"  extra [ips_fixed] peers (full history)
 #   SYNC_WAIT_MIN=30                 test: minutes to wait for the node to sync before the checks
+#   TEST_TIMEOUT_MIN=10              stop the test suite if it takes longer (it normally needs ~1 minute)
 #   FORCE=1                          continue past failed hardware checks
 #
 # NOT TESTED ON A REAL HOST yet: checked with bash -n and shellcheck. The manual steps are in
@@ -35,6 +37,8 @@ MODE=""
 YES=0
 CHECK_ONLY=0
 TRIAL_ONLY=0
+SKIP_TESTS=0
+TEST_TIMEOUT_MIN="${TEST_TIMEOUT_MIN:-10}"
 FORCE="${FORCE:-0}"
 DB_PATH="${DB_PATH:-/var/lib/xrpld/db/nudb}"
 SYNC_WAIT_MIN="${SYNC_WAIT_MIN:-30}"
@@ -52,6 +56,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) YES=1; shift ;;
     --check) CHECK_ONLY=1; shift ;;
     --trial) TRIAL_ONLY=1; shift ;;
+    --skip-tests) SKIP_TESTS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
   esac
@@ -300,16 +305,30 @@ step_env() {
 }
 
 step_tests() {
-  local uri
+  local uri no_int=1 rc=0 logf="$REPO_DIR/logs/install-tests.log"
+  if [ "$SKIP_TESTS" = 1 ]; then warn "test suite skipped (--skip-tests)"; return 0; fi
   uri="$(env_get MONGO_URI)"
-  say "Running the test suite"
-  case "$uri" in
-    "$LOCAL_MONGO"*|mongodb://localhost:27017*)
-      (cd "$REPO_DIR" && .venv/bin/python -m pytest -q) ;;
-    *)  # end-to-end tests expect a local MongoDB without password
-      (cd "$REPO_DIR" && XRPL_INGEST_NO_INTEGRATION=1 .venv/bin/python -m pytest -q) ;;
-  esac || die "tests failed (output above). Nothing is broken on your system; please report the output."
-  ok "tests passed"
+  case "$uri" in "$LOCAL_MONGO"*|mongodb://localhost:27017*) no_int=0 ;; esac  # end-to-end tests need a local MongoDB without password
+  mkdir -p "$REPO_DIR/logs"
+  say "Running the test suite (normally about 1 minute; stopped after $TEST_TIMEOUT_MIN minutes; output also in logs/install-tests.log)"
+  # -v: every test name is printed, so a stuck test is visible; faulthandler_timeout: after
+  # 120 s in one test, Python prints where it is stuck (into the log).
+  local envs=(PYTHONUTF8=1)
+  if [ "$no_int" = 1 ]; then envs+=(XRPL_INGEST_NO_INTEGRATION=1); fi
+  (cd "$REPO_DIR" && env "${envs[@]}" timeout -s INT -k 30 "$((TEST_TIMEOUT_MIN * 60))" \
+     .venv/bin/python -m pytest -v -o faulthandler_timeout=120 2>&1 \
+     | tee "$logf" \
+     | grep -E --line-buffered " (PASSED|FAILED|ERROR|SKIPPED)|passed|failed|Timeout|Traceback" \
+     | sed -u 's/^/   /'; exit "${PIPESTATUS[0]}") || rc=$?
+  if [ "$rc" = 0 ]; then ok "tests passed"; return 0; fi
+  if [ "$rc" = 124 ] || [ "$rc" = 130 ] || [ "$rc" = 137 ]; then
+    warn "the test suite did not finish within $TEST_TIMEOUT_MIN minutes (a test is stuck). Details: $logf"
+  else
+    warn "some tests failed (exit $rc). Details: $logf"
+  fi
+  echo "     Your system is not changed by this. Please send logs/install-tests.log to the developers."
+  ask "Continue the setup anyway (node, services, real-data checks)?" N || \
+    die "stopped after the tests. Continue later with:  bash install.sh --skip-tests"
 }
 
 step_doctor() {
@@ -357,7 +376,7 @@ step_trial() {
   say "3/4 verify:          the same range"
   xi verify --start "$start" --end "$end" || fails=$((fails + 1))
   say "4/4 live tail:       60 seconds, then a graceful stop"
-  (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 timeout -s INT 60 .venv/bin/python -m xrpl_ingest tail) || true
+  (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 timeout -s INT -k 30 60 .venv/bin/python -m xrpl_ingest tail) || true
   xi health || fails=$((fails + 1))
   xi status || true
   if [ "$fails" = 0 ]; then ok "real data arrives: newest ledger, backfill, verify and live tail all worked (database $TEST_DB)"

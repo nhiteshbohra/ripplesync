@@ -314,14 +314,13 @@ class InstantPool:
     'dies' (BrokenProcessPool), like the OOM case, in the same batch as finished chunks."""
     BAD = POOL_LO + 10
 
+    shutdowns: list = []  # wait= of every shutdown() call, newest last
+
     def __init__(self, max_workers, mp_context, **kw):
         pass
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+    def shutdown(self, wait=True, cancel_futures=False):
+        InstantPool.shutdowns.append(wait)
 
     def submit(self, fn, args):
         fut = Future()
@@ -347,6 +346,50 @@ def test_pool_broken_batch_keeps_results_of_chunks_that_finished(cfg, store, mon
     # first window = 4 chunks: 3 finished (and marked done in their workers), 1 broke
     assert summary["chunks_run"] == 3 and summary["ledgers_ok"] == 30
     assert summary["chunks_incomplete"] == 8 - 3
+    assert InstantPool.shutdowns[-1] is False  # a broken pool is never waited for
+
+
+class _Proc:
+    def __init__(self, pid, exitcode):
+        self.pid, self.exitcode, self.terminated = pid, exitcode, False
+
+    def terminate(self):
+        self.terminated = True
+
+
+class SilentDeathPool(InstantPool):
+    """A worker exits but its future stays pending forever (seen on Linux): only the
+    parent's own check of the worker processes can notice it."""
+    def __init__(self, max_workers, mp_context, **kw):
+        self._processes = {1: _Proc(101, None), 2: _Proc(102, None)}
+
+    def submit(self, fn, args):
+        fut = Future()
+        _cfg, chunk = args
+        if chunk[0] == POOL_LO + 10:
+            self._processes[2].exitcode = 137  # worker 2 vanished; fut never completes
+        else:
+            fut.set_result(_ok_chunk(args))
+        return fut
+
+
+def test_pool_notices_dead_worker_whose_future_never_completes(cfg, store, monkeypatch, caplog):
+    monkeypatch.setattr(backfill, "ProcessPoolExecutor", SilentDeathPool)
+    monkeypatch.setattr(backfill, "POLL_SECONDS", 0.01)
+    with caplog.at_level("ERROR", logger="xrpl_ingest.backfill"):
+        summary = pool_run(cfg, store)  # used to wait forever
+    assert summary["chunks_incomplete"] >= 1
+    assert any("worker process 102 exited with code 137" in m for m in caplog.messages)
+    assert InstantPool.shutdowns[-1] is False
+
+
+def test_dead_worker_and_terminate_helpers():
+    pool = SilentDeathPool(2, None)
+    assert backfill._dead_worker(pool) is None
+    pool._processes[1].exitcode = -9
+    assert backfill._dead_worker(pool) == (101, -9)
+    backfill._terminate(pool)
+    assert all(p.terminated for p in pool._processes.values()) and InstantPool.shutdowns[-1] is False
 
 
 @pytest.mark.parametrize("content", ["current_process=0", "backfill=0", "BACKFILL = 0  # pause"])
