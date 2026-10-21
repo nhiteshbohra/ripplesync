@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 from pymongo.errors import PyMongoError
 
+from .config import redact_url
 from .errors import RpcError, TransientError
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 
@@ -54,7 +55,7 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
         except (TransientError, RpcError) as e:
             if stop_check():  # e.g. StopRequested while reconnecting: exit, no backoff first
                 break
-            log.warning("cannot read latest validated ledger: %s", e)
+            log.warning("cannot read latest validated ledger: %s", redact_url(str(e)))
             await sleep(retry.delay(node_failures))
             node_failures += 1
             continue
@@ -97,5 +98,5 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             try:
                 await asyncio.to_thread(store.set_checkpoint, idx)
             except PyMongoError as e:
-                log.warning("checkpoint write failed at %d (%s); will catch up", idx, e)
+                log.warning("checkpoint write failed at %d (%s); will catch up", idx, redact_url(str(e)))
     return last

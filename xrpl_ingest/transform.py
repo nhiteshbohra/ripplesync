@@ -232,12 +232,19 @@ def escape_keys(value: Any) -> Any:
     return value
 
 
-def same_value(stored: Any, received: Any) -> bool:
+def same_value(stored: Any, received: Any, *, _coerce: bool = True) -> bool:
     """True when `received` adds nothing to `stored` (equal, or equal after our int coercion).
-    bool/float compare type-strictly: True == 1 == 1.0 in Python, not in the data."""
+    bool/float compare type-strictly at every depth: True == 1 == 1.0 in Python, not
+    in the data. Integer string coercion applies only to the mapped top-level value."""
+    if isinstance(stored, dict) and isinstance(received, dict):
+        return stored.keys() == received.keys() and all(
+            same_value(stored[k], received[k], _coerce=False) for k in stored)
+    if isinstance(stored, list) and isinstance(received, list):
+        return len(stored) == len(received) and all(
+            same_value(a, b, _coerce=False) for a, b in zip(stored, received))
     if isinstance(stored, (bool, float)) or isinstance(received, (bool, float)):
         return type(stored) is type(received) and stored == received
-    return stored == received or stored == to_int(received)
+    return stored == received or (_coerce and stored == to_int(received))
 
 
 def merge_field(doc: Dict[str, Any], key: Any, value: Any,

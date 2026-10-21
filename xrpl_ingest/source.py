@@ -66,6 +66,9 @@ def _server_info(result: Dict[str, Any]) -> Dict[str, Any]:
     seq = validated.get("seq")
     if seq is not None and (type(seq) is not int or seq < 0):
         raise TransientError("node returned malformed validated ledger sequence")
+    network = info.get("network_id")
+    if network is not None and (type(network) is not int or network < 0):
+        raise TransientError("node returned malformed server_info.network_id (expected non-negative integer)")
     return info
 
 
@@ -172,7 +175,7 @@ class WsSource:
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
         except Exception as e:  # noqa: BLE001 - e.g. websockets ConnectionClosedError
-            reason = f"{type(e).__name__}: {e}"  # websockets puts the close code/reason in str(e)
+            reason = redact_url(f"{type(e).__name__}: {e}")  # includes close code/reason
         finally:
             if not conn.closed:  # closed=True means our own _drop/close; nothing to report
                 log.warning("connection to %s lost: %s", conn.url, reason)
@@ -249,7 +252,7 @@ class WsSource:
             raise
         except Exception as e:  # noqa: BLE001 - send on a closed socket etc.
             conn.pending.pop(rid, None)
-            reason = f"{type(e).__name__}: {e}"  # e.g. websockets 1009 message too big
+            reason = redact_url(f"{type(e).__name__}: {e}")  # e.g. websockets 1009 message too big
             await self._drop(conn, f"connection to {conn.url} dropped: {reason}")
             raise ConnectionLost(f"{command} failed: {reason}") from e
         finally:
@@ -258,7 +261,8 @@ class WsSource:
         result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
         if msg.get("status") == "error" or "error" in msg or result.get("status") == "error":
             err = msg.get("error") or result.get("error") or "unknown"
-            raise RpcError(str(err), str(msg.get("error_message") or result.get("error_message") or ""))
+            raise RpcError(redact_url(str(err)),
+                           redact_url(str(msg.get("error_message") or result.get("error_message") or "")))
         if "warnings" in msg:  # message-level node warnings: keep them with the result
             if "warnings" not in result:
                 result["warnings"] = msg["warnings"]

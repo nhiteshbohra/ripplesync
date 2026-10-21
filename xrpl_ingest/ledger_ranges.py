@@ -8,6 +8,8 @@ Range = Tuple[int, int]  # inclusive
 
 def parse_complete_ledgers(text: str) -> List[Range]:
     """Parse server_info's complete_ledgers, e.g. '32570-100,105,200-300' or 'empty'."""
+    if text is not None and not isinstance(text, str):
+        raise ValueError("complete_ledgers must be a string")
     text = (text or "").strip()
     if not text or text.lower() == "empty":
         return []

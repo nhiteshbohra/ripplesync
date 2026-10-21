@@ -33,6 +33,7 @@ Modes:
 - Chunks on a fixed grid ⇒ resume works regardless of `--start`.
 
 ## Constraints
+- Deep repair rechecks hashes for every target after writing, using a set for target membership, and honors stop checks during that comparison. New post-repair mismatches/outages are counted in the summary. Lossless collision comparison distinguishes nested bool/int/float values; only mapped top-level values use the existing integer-string coercion rule.
 - Request deadlines cover both WebSocket send and reply. A stalled/cancelled send drops the transport; a reply timeout preserves a connection that received other traffic. Node status objects and validated sequences are checked at the shared source boundary and malformed responses raise retryable node errors.
 - Checkpoint parsing is shared by tail/status and health; malformed stored progress raises an actionable configuration error without rewriting it. Doctor only reads lock metadata and makes no assertion about current OS ownership; actual ingestion lock enforcement is unchanged.
 - Installer helpers accept BOM-encoded configuration, preserve MongoDB URI-file mode, reserve unique backups and publish a repaired validator file before changing the config pointer. Linux derives the WebSocket URL from the existing managed stanza unless `NODE_WS` overrides it. These paths have isolated fixture checks, not target-host deployment verification.

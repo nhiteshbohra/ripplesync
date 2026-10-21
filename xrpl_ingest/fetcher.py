@@ -9,7 +9,7 @@ from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from .config import MAX_BACKOFF_EXPONENT
+from .config import MAX_BACKOFF_EXPONENT, redact_url
 from .errors import StopRequested, is_retryable
 from .transform import parse_ledger_result
 
@@ -70,7 +70,7 @@ async def prepare_ledger(source: Any, index: int, retry: RetryPolicy, *,
         except Exception as e:
             if not is_retryable(e) or attempt == retry.attempts - 1:
                 raise
-            log.warning("ledger %d: fetch/transform attempt %d/%d failed: %s", index, attempt + 1, retry.attempts, e)
+            log.warning("ledger %d: fetch/transform attempt %d/%d failed: %s", index, attempt + 1, retry.attempts, redact_url(str(e)))
             await sleep(retry.delay(attempt))
     raise ValueError("retry.attempts must be positive")
 
@@ -93,7 +93,7 @@ async def persist_bundles(store: Any, bundles: list, retry: RetryPolicy, *,
         except Exception as e:
             if not is_retryable(e) or attempt == retry.attempts - 1:
                 raise
-            log.warning("saving %d ledger(s): attempt %d/%d failed: %s", len(bundles), attempt + 1, retry.attempts, e)
+            log.warning("saving %d ledger(s): attempt %d/%d failed: %s", len(bundles), attempt + 1, retry.attempts, redact_url(str(e)))
         finally:
             if timings is not None:
                 timings["write_seconds"] = timings.get("write_seconds", 0) + time.perf_counter() - started
@@ -103,7 +103,7 @@ async def persist_bundles(store: Any, bundles: list, retry: RetryPolicy, *,
 
 async def failed_ledger(store: Any, index: int, error: Exception) -> IngestResult:
     """Preserve failure recording and stop semantics for both ingestion paths."""
-    last_error = f"{type(error).__name__}: {error}"
+    last_error = redact_url(f"{type(error).__name__}: {error}")
     if isinstance(error, StopRequested):
         log.info("ledger %d: not fetched, stop requested", index)
         return IngestResult(index, False, error=last_error, recorded=False)
@@ -111,7 +111,7 @@ async def failed_ledger(store: Any, index: int, error: Exception) -> IngestResul
     try:
         await asyncio.to_thread(store.record_failure, index, last_error)
     except Exception as e:  # noqa: BLE001 - store is down; ledger stays unrecorded
-        log.error("ledger %d: could not record failure (%s); rerun backfill to cover it", index, e)
+        log.error("ledger %d: could not record failure (%s); rerun backfill to cover it", index, redact_url(str(e)))
         return IngestResult(index, False, error=last_error, recorded=False)
     return IngestResult(index, False, error=last_error)
 

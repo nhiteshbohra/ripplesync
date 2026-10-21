@@ -266,7 +266,8 @@ async def _check_window(source: Any, store: Any, a: int, b: int, *, deep: bool,
     if source is None or node_ranges is None:
         return w
     stored = await asyncio.to_thread(store.ledger_numbers, a, b)
-    targets = [n for n in stored if on_node(n, node_ranges) and (only is None or n in only)]
+    wanted = set(only) if only is not None else None
+    targets = [n for n in stored if on_node(n, node_ranges) and (wanted is None or n in wanted)]
     w.diffs, w.unchecked, w.stopped = await compare_hashes(
         source, store, targets, retry=retry, concurrency=concurrency, stop_check=stop_check,
         sleep=sleep)
@@ -335,15 +336,18 @@ async def _repair_window(source: Any, store: Any, a: int, b: int, w: _Window, to
         if not r.ok:
             s.failed += 1
             emit(f"ledger {r.block_number}: repair failed: {r.error}")
-    # check again; the node comparison only for the ledgers that differed before
+    # Recheck every repair target, including gaps/count mismatches that had no hash diff.
     again = await _check_window(source, store, a, b, deep=deep, node_ranges=node_ranges,
-                                only=[d.block_number for d in w.diffs], retry=retry,
-                                concurrency=concurrency, stop_check=lambda: False, sleep=sleep)
+                                only=todo, retry=retry,
+                                concurrency=concurrency, stop_check=stop_check, sleep=sleep)
+    s.hash_mismatches += len({d.block_number for d in again.diffs} -
+                             {d.block_number for d in w.diffs})
+    s.unchecked += len({n for n, _ in again.unchecked} - {n for n, _ in w.unchecked})
     again.unchecked += [u for u in w.unchecked if u[0] not in {x[0] for x in again.unchecked}]
     for d in again.diffs:
         emit(describe_diff(d) + " (after repair)")
     s.remaining += again.count()
-    return stopped
+    return stopped or again.stopped or stop_check()
 
 
 # -- tx spot check (`tx --hash H`): stored tx doc vs the node's `tx` result -------------------

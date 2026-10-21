@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional, Tuple
 
 from pymongo.errors import PyMongoError
 
-from ..config import Config
+from ..config import Config, redact_url
 from ..errors import ConfigError, IngestError, NetworkMismatch
 from ..source import WsSource
 from ..store import LAST_LEDGER_ID, MongoStore, checkpoint_index
@@ -98,7 +98,7 @@ class DiskGuard:
         try:
             free = mongo_free_bytes(self.store)
         except PyMongoError as e:
-            log.warning("disk space check failed: %s", e)
+            log.warning("disk space check failed: %s", redact_url(str(e)))
             return False
         if free is None:
             if not self._warned_unknown:

@@ -1510,6 +1510,8 @@ Important ideas:
 - **Checkpoint conversion.** Legacy string checkpoints are converted only if the value has not changed since it was read; a competing writer's newer numeric checkpoint is preserved.
 - **Damaged checkpoints.** A malformed, negative or fractional checkpoint stops tail/status/health with a configuration error; it is never silently reset. Back up the metadata document, inspect stored ledgers and recorded failures, then restore a verified non-negative integer checkpoint. Deleting it can invoke the documented start-at-latest behavior and leave a gap.
 - **Network guard.** The program refuses a server that reports another network (for example testnet). This stops testnet data from mixing with mainnet data, a bug of the old scripts.
+- **Verification after repair.** `verify --repair --deep` compares node hashes for every repair target, including previously missing ledgers and count mismatches. A failed comparison remains a verification problem; a stop request prevents further comparison requests.
+- **Lossless collisions.** Nested booleans, integers and floats remain distinct when retaining conflicting node fields under `raw_` names. Operational error messages remove URL usernames/passwords before logging or saving failure reasons.
 
 ### Backfill pipeline and performance checks
 

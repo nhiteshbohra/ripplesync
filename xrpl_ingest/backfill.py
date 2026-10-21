@@ -14,7 +14,7 @@ from typing import Any, Callable, List, Optional, Set, Tuple
 
 from pymongo.errors import PyMongoError
 
-from .config import Config
+from .config import Config, redact_url
 from .config import FIRST_LEDGER
 from .support.monitor import DiskGuard
 from .errors import IngestError, TransientError
@@ -91,7 +91,7 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
                 res.ok += len(batch)
                 return
             except Exception as e:
-                log.warning("batch save failed (%s); isolating %d ledger(s)", e, len(batch))
+                log.warning("batch save failed (%s); isolating %d ledger(s)", redact_url(str(e)), len(batch))
         for bundle in batch:
             idx = bundle[0]["block_number"]
             try:
@@ -147,7 +147,7 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
         except PyMongoError as e:
             res.marker_failed = True
             log.error("chunk %d-%d: could not mark done (%s); the next backfill redoes it",
-                      chunk[0], chunk[1], e)
+                      chunk[0], chunk[1], redact_url(str(e)))
     return res
 
 
