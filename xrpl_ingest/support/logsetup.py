@@ -19,7 +19,8 @@ log = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _OURS = "_xrpl_ingest_handler"  # marks handlers we installed, so setup can be repeated
 _LOG_ESCAPES = str.maketrans({chr(n): ascii(chr(n))[1:-1]
-                            for n in (*range(32), *range(127, 160), 0x2028, 0x2029)})
+                            for n in (*range(32), *range(127, 160), *range(0x202A, 0x202F),
+                                      *range(0x2066, 0x206A), 0x2028, 0x2029)})
 
 
 class UtcFormatter(logging.Formatter):

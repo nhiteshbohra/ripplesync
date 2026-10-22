@@ -244,6 +244,23 @@ def test_deep_node_error_counts_as_not_compared(store):
     assert "ledger 2: could not compare with node: RpcError: lgrNotFound" in lines
 
 
+def test_post_repair_non_hash_problem_is_identified(store, monkeypatch):
+    save(store, 1)
+    store.ledgers.update_one({"block_number": 1}, {"$set": {"num_transactions": 99}})
+    calls = {"n": 0}
+    real = store.tx_count_mismatches
+
+    def mismatches(a, b):
+        calls["n"] += 1
+        return real(a, b) if calls["n"] == 1 else [(1, 99, 2)]
+
+    monkeypatch.setattr(store, "tx_count_mismatches", mismatches)
+    s, lines = repair(FakeSource(), store, 1, 1)
+    assert s.remaining == 1
+    assert any("ledger 1: expected 99 transactions, stored 2 (after repair)" in line
+               for line in lines)
+
+
 def test_deep_transient_node_error_is_retried(store):
     save(store, *range(1, 4))
     src = FakeSource()

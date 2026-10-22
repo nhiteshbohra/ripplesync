@@ -100,7 +100,8 @@ def test_error_response_raises_rpcerror():
 
 def test_slowdown_is_retryable():
     assert RpcError("slowDown").retryable and RpcError("noNetwork").retryable
-    assert not RpcError("invalidParams").retryable
+    assert not RpcError("invalidParams").retryable and RpcError("invalidParams").fatal
+    assert RpcError("noPermission").fatal and not RpcError("lgrNotFound").fatal
 
 
 def test_timeout_raises_and_pending_cleaned():

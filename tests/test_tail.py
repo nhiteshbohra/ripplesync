@@ -118,6 +118,14 @@ def test_failed_ledger_recorded_and_tail_moves_on(store):
     assert store.get_checkpoint() == 100
 
 
+def test_systemic_rpc_error_stops_tail_without_advancing_checkpoint(store):
+    store.set_checkpoint(98)
+    src = FakeSource({99: [RpcError("noPermission")]}, latest=100)
+    with pytest.raises(RpcError, match="noPermission"):
+        run_tail(src, store, iterations=1)
+    assert store.get_checkpoint() == 98 and store.list_failed() == []
+
+
 def test_node_unreachable_backs_off_then_recovers(store):
     store.set_checkpoint(99)
     src = FakeSource(latest=100)
@@ -125,6 +133,24 @@ def test_node_unreachable_backs_off_then_recovers(store):
     sleeps = []
     assert run_tail(src, store, iterations=3, sleeps=sleeps) == 100
     assert len(sleeps) == 2
+
+
+def test_systemic_server_info_error_stops_tail_without_retrying(store):
+    store.set_checkpoint(99)
+    src = FakeSource(latest=100)
+    src.latest_errors = [RpcError("invalidParams")]
+    sleeps = []
+    with pytest.raises(RpcError, match="invalidParams"):
+        run_tail(src, store, iterations=2, sleeps=sleeps)
+    assert sleeps == []
+
+
+def test_other_permanent_server_info_error_also_stops_tail(store):
+    store.set_checkpoint(99)
+    src = FakeSource(latest=100)
+    src.latest_errors = [RpcError("lgrNotFound")]
+    with pytest.raises(RpcError, match="lgrNotFound"):
+        run_tail(src, store, iterations=2)
 
 
 def test_tail_survives_more_than_1024_node_failures(store):

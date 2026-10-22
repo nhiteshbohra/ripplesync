@@ -20,7 +20,8 @@ from pymongo.errors import ExecutionTimeout, OperationFailure, PyMongoError
 from pymongo.write_concern import WriteConcern
 
 from .. import __version__
-from ..config import ENV_VARS, WINDOWS_MAX_PROCESSES, Config, display_value, redact_mongo_uri
+from ..config import (ENV_VARS, WINDOWS_MAX_PROCESSES, Config, display_value,
+                      redact_mongo_uri, redact_url)
 from .monitor import GB, local_free_bytes, mongo_free_bytes
 from ..errors import ConfigError, IngestError, NetworkMismatch
 from .monitor import FAST_TIMEOUT_S, fast_source, fast_store
@@ -138,6 +139,8 @@ def config_rows(cfg: Optional[Config], env: EnvFile, environ: Any, base_dir: str
             value = str(environ[name])
             if name == "MONGO_URI":
                 value = redact_mongo_uri(value)
+            elif name == "SERVERS":
+                value = redact_url(value)
         if control_chars(value):
             value = repr(value)
         rows.append((name, value, src))
@@ -354,6 +357,7 @@ def check_chunk_docs(r: Report, meta: Any, chunk_size: int) -> None:
     """Chunk docs written with another CHUNK_SIZE are never matched by backfill: those ranges
     are fetched again (harmless but slow)."""
     sizes: Dict[int, int] = {}
+    old_grid = 0
     misaligned = partial = good = 0
     cur = meta.find({"kind": CHUNK_KIND}, {"start": 1, "end": 1, "_id": 0})
     try:
@@ -369,13 +373,16 @@ def check_chunk_docs(r: Report, meta: Any, chunk_size: int) -> None:
             good += 1
         elif a // chunk_size == b // chunk_size:
             partial += 1  # clipped at a range edge, or a smaller old CHUNK_SIZE
+            if n < chunk_size and chunk_size % n == 0 and a % n == 0:
+                old_grid += 1
         else:
             misaligned += 1
             sizes[n] = sizes.get(n, 0) + 1
-    if misaligned:
+    if misaligned or old_grid:
         seen = ", ".join(f"{n} ledgers x{c}" for n, c in sorted(sizes.items())[:5])
         r.add("chunk docs", "warn",
-              f"{misaligned} chunk docs do not fit CHUNK_SIZE={chunk_size} ({seen}); backfill "
+              f"{misaligned + old_grid} chunk docs may not fit CHUNK_SIZE={chunk_size} "
+              f"({seen or f'{old_grid} smaller aligned'}); backfill "
               "fetches those ranges again. Did CHUNK_SIZE change? Set it back to skip them.")
     else:
         r.add("chunk docs", "ok", f"{good} full, {partial} partial (range edges) for "
@@ -414,7 +421,10 @@ def check_mongo(r: Report, cfg: Config, store_factory: Callable[[Config], Any] =
         _check_mongo_disk(r, store, cfg)
         db = store.ledgers.database
         check_indexes(r, db, cfg)
-        check_chunk_docs(r, store.meta, cfg.chunk_size)
+        try:
+            check_chunk_docs(r, store.meta, cfg.chunk_size)
+        except ExecutionTimeout:
+            r.add("chunk docs", "info", f"not checked: more than {FAST_TIMEOUT_S}s")
     except OperationFailure as e:
         r.add("mongo", "fail", f"{type(e).__name__}: {e} (missing privileges?)", 2)
     except PyMongoError as e:

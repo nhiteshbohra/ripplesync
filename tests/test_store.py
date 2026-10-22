@@ -1,4 +1,7 @@
+import pytest
+
 from conftest import NOW, make_result
+from xrpl_ingest.errors import ConfigError
 from xrpl_ingest.store import LAST_LEDGER_ID
 from xrpl_ingest.transform import parse_ledger_result
 
@@ -86,6 +89,12 @@ def test_highest_ledger(store):
     for idx in (7, 30, 12):
         store.save_ledger_bundle(*bundle(idx))
     assert store.highest_ledger() == 30
+
+
+def test_highest_ledger_reports_damaged_block_number(store):
+    store.ledgers.insert_one({"block_number": "broken"})
+    with pytest.raises(ConfigError, match="block_number"):
+        store.highest_ledger()
 
 
 def test_checkpoint_never_moves_back(store):

@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 # ======================================================================================
 
 
-MAX_READ_BYTES = 4096  # the switch is a few short lines; never read a huge file
+MAX_READ_BYTES = 1024 * 1024  # bounded, but large enough for files edited by external tools
 CHECK_INTERVAL = 1.0  # StopFlag reads the file at most this often (seconds)
 ALL_KEY = "current_process"
 COMMAND_KEYS = ("tail", "backfill", "retry-failed")

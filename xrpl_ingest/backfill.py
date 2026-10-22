@@ -434,15 +434,21 @@ async def retry_failed(source: Any, store: Any, retry: RetryPolicy, *, max_round
     fail again every round. Alone, the neighbours recover and only the poison one remains.
     """
     for rnd in range(1, max_rounds + 1):
-        failed = await asyncio.to_thread(store.list_failed_with_reasons)
-        if not failed:
+        total = await asyncio.to_thread(store.count_failed)
+        if not total:
             return 0
-        alone = [n for n, reason in failed if may_have_killed_neighbours(reason)]
-        together = [n for n, reason in failed if not may_have_killed_neighbours(reason)]
-        log.info("retry round %d/%d: %d failed ledgers (%d one at a time after the others)",
-                 rnd, max_rounds, len(failed), len(alone))
-        for indices, workers in ((together, concurrency), (alone, 1)):
-            await _reingest(source, store, indices, retry, workers, stop_check, sleep)
+        log.info("retry round %d/%d: %d failed ledgers", rnd, max_rounds, total)
+        page_size = max(1000, concurrency * 4)
+        for suspects, workers in ((False, concurrency), (True, 1)):
+            after = -1
+            while not stop_check():
+                page = await asyncio.to_thread(store.failed_page, after, page_size)
+                if not page:
+                    break
+                after = page[-1][0]
+                indices = [n for n, reason in page
+                           if may_have_killed_neighbours(reason) is suspects]
+                await _reingest(source, store, indices, retry, workers, stop_check, sleep)
         if stop_check():
             break
         if await asyncio.to_thread(store.count_failed) and rnd < max_rounds:

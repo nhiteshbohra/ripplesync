@@ -319,6 +319,13 @@ def test_config_rows_sources(dcfg):
     assert rows["ENV_FILE"][0] == "/x/.env"
 
 
+def test_config_rows_invalid_config_hides_server_query_credentials():
+    env = EnvFile(path=None, from_file=frozenset())
+    rows = {name: value for name, value, _ in doctor.config_rows(
+        None, env, {"SERVERS": "wss://node/path?token=fixture-secret"}, "/x")}
+    assert "fixture-secret" not in rows["SERVERS"]
+
+
 # -- health -----------------------------------------------------------------------------------
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)

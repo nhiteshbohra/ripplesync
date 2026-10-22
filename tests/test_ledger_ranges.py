@@ -65,3 +65,8 @@ def test_plan_gap_in_node_history():
     chunks, unavailable = plan_chunks(1, 30, [(1, 9), (21, 30)], 10, set())
     assert chunks == [(1, 9), (21, 29), (30, 30)]  # grid-aligned, never spans the gap
     assert unavailable == [(10, 20)]
+
+
+def test_plan_rejects_a_chunk_grid_too_large_to_materialize():
+    with pytest.raises(ValueError, match="increase CHUNK_SIZE"):
+        plan_chunks(1, 100_001, [(1, 100_001)], 1, set())

@@ -67,6 +67,14 @@ def test_duplicate_collection_names_rejected():
         Config.from_env({**BASE, "TX_COLLECTION": "block_number"})
 
 
+@pytest.mark.parametrize("name,value", [("DB_NAME", "bad/name"),
+                                         ("TX_COLLECTION", "bad$name"),
+                                         ("TX_COLLECTION", "system.users")])
+def test_invalid_mongo_namespace_rejected(name, value):
+    with pytest.raises(ConfigError, match="invalid|forbids"):
+        Config.from_env({**BASE, name: value})
+
+
 def test_bad_log_level():
     with pytest.raises(ConfigError, match="LOG_LEVEL"):
         Config.from_env({**BASE, "LOG_LEVEL": "loud"})
@@ -101,10 +109,10 @@ def test_repr_redacts_server_credentials():
     ("no creds ws://a and mongodb://h", "no creds ws://a and mongodb://h"),
     # Auditor A r13
     ("ws://u:pa/ss@host:6006", "ws://host:6006"),  # unencoded '/' in the password
-    ("mongodb://u:p@h1:27017,h2:27017/db?authSource=admin", "mongodb://h1:27017,h2:27017/db?authSource=admin"),
+    ("mongodb://u:p@h1:27017,h2:27017/db?authSource=admin", "mongodb://h1:27017,h2:27017/db?<1 option(s) hidden>"),
     ("mongodb+srv://u:p@cluster.example.net/db", "mongodb+srv://cluster.example.net/db"),
     ("connect to ws://a:b@h failed: [Errno 111] x@y", "connect to ws://h failed: [Errno 111] x@y"),
-    ("ws://host:6006/?token=a@b", "ws://host:6006/?token=a@b"),  # '@' in the query is not userinfo
+    ("ws://host:6006/?token=a@b", "ws://host:6006/?<1 option(s) hidden>"),
     ("email admin@example.com", "email admin@example.com"),
     ("ws://u%40x:p%2Fq@host", "ws://host"),
     ("WS://U:P@HOST", "WS://HOST"),
@@ -113,6 +121,12 @@ def test_repr_redacts_server_credentials():
 ])
 def test_redact_url_in_urls_and_messages(text, shown):
     assert redact_url(text) == shown
+
+
+def test_invalid_server_error_hides_query_credentials():
+    with pytest.raises(ConfigError) as error:
+        Config.from_env({**BASE, "SERVERS": "http://node/path?token=fixture-secret"})
+    assert "fixture-secret" not in str(error.value)
 
 
 def test_network_check_can_be_disabled():

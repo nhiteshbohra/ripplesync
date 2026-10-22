@@ -26,6 +26,12 @@ def test_formatter_is_utc_not_local():
     assert logsetup.UtcFormatter(logsetup.LOG_FORMAT).format(rec).startswith("1970-01-01T00:00:00.005Z")
 
 
+def test_formatter_escapes_bidirectional_controls():
+    rec = logging.LogRecord("n", logging.INFO, "", 0, "safe\u202eevil", (), None)
+    shown = logsetup.UtcFormatter(logsetup.LOG_FORMAT).format(rec)
+    assert "\u202e" not in shown and "\\u202e" in shown
+
+
 def test_log_file_rotates(restore_logging, tmp_path):
     f = tmp_path / "logs" / "x.log"  # parent dir is created
     handlers = setup_logging("INFO", str(f), max_mb=1, backups=2, stream=io.StringIO())

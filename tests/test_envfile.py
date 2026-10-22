@@ -4,6 +4,9 @@ import sys
 import pytest
 from dotenv import dotenv_values
 
+from xrpl_ingest.errors import ConfigError
+from xrpl_ingest.support.files import load_env
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "setup"))
 import envfile  # noqa: E402
 
@@ -46,6 +49,13 @@ def test_values_read_back_unchanged_by_python_dotenv(tmp_path, value):
 def test_line_break_refused():
     with pytest.raises(ValueError):
         envfile.quote("a\nb")
+
+
+def test_runtime_loader_rejects_malformed_lines_instead_of_using_defaults(tmp_path):
+    (tmp_path / ".env").write_text(
+        "MONGO_URI=mongodb://localhost\nMIN_FREE_GB 100\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="malformed line.*2"):
+        load_env({}, str(tmp_path))
 
 
 def test_cli_creates_from_example_then_backs_up_on_change(tmp_path, capsys):

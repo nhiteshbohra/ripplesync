@@ -53,6 +53,8 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             latest = await source.latest_validated()
             node_failures = 0
         except (TransientError, RpcError) as e:
+            if isinstance(e, RpcError) and not e.retryable:
+                raise
             if stop_check():  # e.g. StopRequested while reconnecting: exit, no backoff first
                 break
             log.warning("cannot read latest validated ledger: %s", redact_url(str(e)))

@@ -14,6 +14,7 @@ from .errors import StopRequested, is_retryable
 from .transform import parse_ledger_result
 
 log = logging.getLogger(__name__)
+MAX_FAILURE_REASON_BYTES = 8192
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -86,9 +87,6 @@ async def persist_bundles(store: Any, bundles: list, retry: RetryPolicy, *,
                 await asyncio.to_thread(store.save_ledger_bundle, *bundles[0])
             else:
                 await asyncio.to_thread(store.save_ledger_bundles, bundles)
-            if clear_failure:
-                for ledger, _, _ in bundles:
-                    await asyncio.to_thread(store.clear_failure, ledger["block_number"])
             return
         except Exception as e:
             if not is_retryable(e) or attempt == retry.attempts - 1:
@@ -103,7 +101,14 @@ async def persist_bundles(store: Any, bundles: list, retry: RetryPolicy, *,
 
 async def failed_ledger(store: Any, index: int, error: Exception) -> IngestResult:
     """Preserve failure recording and stop semantics for both ingestion paths."""
+    if getattr(error, "fatal", False):
+        raise error
     last_error = redact_url(f"{type(error).__name__}: {error}")
+    raw = last_error.encode("utf-8")
+    if len(raw) > MAX_FAILURE_REASON_BYTES:
+        suffix = b"...<truncated>"
+        last_error = (raw[:MAX_FAILURE_REASON_BYTES - len(suffix)] + suffix).decode(
+            "utf-8", errors="ignore")
     if isinstance(error, StopRequested):
         log.info("ledger %d: not fetched, stop requested", index)
         return IngestResult(index, False, error=last_error, recorded=False)

@@ -33,12 +33,12 @@ def test_v1_shape_supported():
     assert metas[0]["meta"]["TransactionIndex"] == 3
 
 
-def test_failed_status_and_unknown_status():
+def test_failed_status_and_missing_metadata_rejected():
     txs, _ = flatten_transactions(1, "LH", 0, [make_tx(0, result="tecUNFUNDED_PAYMENT")], NOW)
     assert txs[0]["status"] == "failed" and txs[0]["result"] == "tecUNFUNDED_PAYMENT"
     no_meta = {"hash": "H", "tx_json": {"Account": "rA"}}
-    txs, metas = flatten_transactions(1, "LH", 0, [no_meta], NOW)
-    assert txs[0]["status"] == "unknown" and metas[0]["meta"] == {}
+    with pytest.raises(MalformedLedger, match="metadata"):
+        flatten_transactions(1, "LH", 0, [no_meta], NOW)
 
 
 def test_issued_currency_amount_kept_as_dict():
@@ -66,7 +66,8 @@ def test_top_level_ledger_fields_win_over_tx_fields():
 
 def test_transaction_without_hash_is_malformed():
     with pytest.raises(MalformedLedger, match="without hash"):
-        flatten_transactions(1, "LH", 0, [{"tx_json": {"Account": "rA"}}], NOW)
+        flatten_transactions(1, "LH", 0, [{"tx_json": {"Account": "rA"},
+                                            "meta": {"TransactionResult": "tesSUCCESS"}}], NOW)
 
 
 def test_bare_hash_transactions_rejected():
@@ -102,6 +103,14 @@ def test_missing_required_ledger_field(field):
     r["ledger"].pop(field, None)
     r.pop("ledger_hash", None)
     with pytest.raises(MalformedLedger, match=field):
+        parse_ledger_result(100, r, NOW)
+
+
+@pytest.mark.parametrize("field", ["ledger_hash", "parent_hash", "account_hash", "transaction_hash"])
+def test_required_ledger_hash_must_be_a_string(field):
+    r = make_result(100)
+    r["ledger"][field] = {"not": "a hash"}
+    with pytest.raises(MalformedLedger, match=f"'{field}'.*not a string"):
         parse_ledger_result(100, r, NOW)
 
 
@@ -267,8 +276,9 @@ def test_affected_accounts_on_tx_doc():
     assert doc["affected_accounts"] == sorted({CAROL, ALICE, DAVE, BOB, GW_HIGH, GW_LOW, ISSUER})
 
 
-def test_affected_accounts_without_meta_are_tx_parties():
-    doc = one({"hash": "H", "tx_json": {"Account": ALICE, "Destination": BOB}})
+def test_affected_accounts_without_affected_nodes_are_tx_parties():
+    doc = one({"hash": "H", "tx_json": {"Account": ALICE, "Destination": BOB},
+               "meta": {"TransactionResult": "tesSUCCESS"}})
     assert doc["affected_accounts"] == sorted([ALICE, BOB])
 
 

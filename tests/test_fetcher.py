@@ -39,6 +39,13 @@ def test_retries_exhausted_records_failure(store):
     assert store.ledgers.count_documents({}) == 0
 
 
+def test_oversized_error_is_truncated_and_recorded(store):
+    r = ingest(FakeSource({100: [RpcError("lgrNotFound", "x" * (17 * 1024 * 1024))]}), store)
+    assert not r.ok and r.recorded
+    reason = store.failed.find_one({"block_number": 100})["reason"]
+    assert len(reason.encode("utf-8")) <= 8192 and reason.endswith("...<truncated>")
+
+
 def test_not_validated_retried(store):
     src = FakeSource({100: [make_result(100, validated=False)]})
     assert ingest(src, store).ok and len(src.calls) == 2

@@ -344,8 +344,11 @@ async def _repair_window(source: Any, store: Any, a: int, b: int, w: _Window, to
                              {d.block_number for d in w.diffs})
     s.unchecked += len({n for n, _ in again.unchecked} - {n for n, _ in w.unchecked})
     again.unchecked += [u for u in w.unchecked if u[0] not in {x[0] for x in again.unchecked}]
-    for d in again.diffs:
-        emit(describe_diff(d) + " (after repair)")
+    lines = describe_problems(again.gaps, again.mismatches) + describe_breaks(again.breaks)
+    lines += [describe_diff(d) for d in again.diffs]
+    lines += [f"ledger {n}: could not compare with node: {err}" for n, err in again.unchecked]
+    for line in lines:
+        emit(line + " (after repair)")
     s.remaining += again.count()
     return stopped or again.stopped or stop_check()
 

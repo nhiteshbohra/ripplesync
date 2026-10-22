@@ -123,6 +123,7 @@ def load_env(environ: Optional[MutableMapping[str, str]] = None,
     from a text stream. A missing default `.env` is fine; a missing ENV_FILE, an unreadable
     or undecodable file is a ConfigError."""
     from dotenv import dotenv_values  # lazy: config-free imports stay cheap
+    from dotenv.parser import parse_stream
     environ = os.environ if environ is None else environ
     cwd = cwd or os.getcwd()
     path, explicit = find_env_file(environ, cwd)
@@ -134,6 +135,11 @@ def load_env(environ: Optional[MutableMapping[str, str]] = None,
         text = read_text(path, ENV_MAX_BYTES)
     except (OSError, TextFileError) as e:
         raise ConfigError(f"cannot read .env file {path}: {e}") from None
+    malformed = [binding.original.line for binding in parse_stream(io.StringIO(text))
+                 if binding.error]
+    if malformed:
+        shown = ", ".join(map(str, malformed[:5]))
+        raise ConfigError(f"cannot parse .env file {path}: malformed line(s) {shown}")
     raw = dotenv_values(stream=io.StringIO(text))
     values = {k: v for k, v in raw.items() if v is not None}
     applied = set()

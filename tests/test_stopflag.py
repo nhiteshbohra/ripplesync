@@ -84,6 +84,12 @@ def test_binary_garbage_means_run(tmp_path):
     assert stop_requested(str(f)) is False
 
 
+def test_stop_directive_after_old_4096_byte_boundary_is_seen(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("#" * 4100 + "\ncurrent_process=0\n")
+    assert stop_requested(str(f)) is True
+
+
 # -- per-command keys, any matching `=0` line stops, case-insensitive -------------------------
 
 @pytest.mark.parametrize("content,command,stop", [

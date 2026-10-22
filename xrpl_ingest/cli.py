@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from pymongo.errors import ConfigurationError, PyMongoError
+from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
 
 from . import __version__
 from .support import doctor, files, monitor
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("tail", "follow new validated ledgers")
 
     r = add("retry-failed", "re-fetch ledgers in the failed collection")
-    r.add_argument("--max-rounds", type=int, default=5)
+    r.add_argument("--max-rounds", type=lambda value: positive_int(value, "--max-rounds"), default=5)
 
     v = add("verify", "find missing ledgers and tx-count mismatches in a range")
     v.add_argument("--start", type=int, required=True)
@@ -171,8 +171,8 @@ def _disk_guard(run: Run, store: MongoStore) -> DiskGuard:
 
 def _cmd_tail(run: Run) -> int:
     store = run.store()
-    store.ensure_indexes()
     guard = _disk_guard(run, store)
+    store.ensure_indexes()
     code = asyncio.run(_run_tail(run.cfg, store, run.stop))
     return EXIT_FAILED if guard.tripped else code
 
@@ -330,6 +330,8 @@ def error_exit_code(e: BaseException) -> int:
         return EXIT_FAILED
     if isinstance(e, LockHeld):
         return EXIT_LOCKED
+    if isinstance(e, OperationFailure) and e.code in (13, 18):
+        return EXIT_CONFIG
     return 2 if isinstance(e, (NetworkMismatch, ValueError, ConfigurationError, ConfigError)) else 4
 
 
@@ -450,6 +452,16 @@ def tx_hash_arg(text: str) -> str:
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
+def positive_int(text: str, option: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{option} must be a positive integer") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{option} must be >= 1")
+    return value
+
+
 def ledger_arg(text: str):
     """argparse type for fetch --ledger: 'validated' or a ledger number >= FIRST_LEDGER."""
     t = text.strip().lower()
@@ -495,6 +507,9 @@ async def _fetch(cfg: Config, store: MongoStore, ledger, stop) -> int:
 
 
 def _verify_cmd(cfg: Config, store: MongoStore, args, stop) -> int:
+    if args.start < FIRST_LEDGER:
+        print(f"verify: --start must be >= {FIRST_LEDGER}", file=sys.stderr)
+        return 2
     if not (args.repair or args.deep):
         return _verify(store, args.start, args.end)
     if args.start > args.end:
@@ -564,6 +579,8 @@ async def _tx(cfg: Config, store: MongoStore, tx_hash: str, stop) -> int:
         node = None
     finally:
         await source.close()
+    if node is not None and (not isinstance(node, dict) or not node):
+        raise IngestError("node returned a malformed empty tx result")
     print(f"tx {tx_hash}")
     if stored is None:
         print("stored: not found")

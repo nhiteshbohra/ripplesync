@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Iterable, List, Set, Tuple
 
 Range = Tuple[int, int]  # inclusive
+MAX_PLANNED_CHUNKS = 100_000
 
 
 def parse_complete_ledgers(text: str) -> List[Range]:
@@ -69,7 +70,16 @@ def plan_chunks(start: int, end: int, node_ranges: List[Range], size: int,
     """Return (chunks_to_run, unavailable_ranges) for a requested [start, end]."""
     if start > end:
         raise ValueError("start must be <= end")
+    if size < 1:
+        raise ValueError("chunk size must be >= 1")
     unavailable = subtract(start, end, node_ranges)
     available = subtract(start, end, unavailable)  # merge overlapping/adjacent node ranges
+    count = sum((b // size) - (a // size) + 1 for a, b in available)
+    # ponytail: a bounded materialized plan keeps the existing scheduler simple. Replace
+    # it with a streaming planner if sub-1000-ledger chunks across full history are needed.
+    if count > MAX_PLANNED_CHUNKS:
+        minimum = max(1, (end - start + MAX_PLANNED_CHUNKS) // MAX_PLANNED_CHUNKS)
+        raise ValueError(f"range would create {count:,} chunks; increase CHUNK_SIZE to at "
+                         f"least {minimum:,}")
     chunks = [c for a, b in available for c in grid_chunks(a, b, size) if c not in done]
     return chunks, unavailable

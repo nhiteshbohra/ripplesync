@@ -183,6 +183,13 @@ def _require(ledger: Dict[str, Any], key: str, index: int) -> Any:
     return value
 
 
+def _require_hash(ledger: Dict[str, Any], key: str, index: int) -> str:
+    value = _require(ledger, key, index)
+    if not isinstance(value, str):
+        raise MalformedLedger(f"ledger {index}: '{key}' is not a string")
+    return value
+
+
 # -- lossless storage -----------------------------------------------------------------------
 # Every field the node sends is stored. Mapped fields keep their names/conversions; every
 # other field is stored as received under its own name. When that name is already taken in
@@ -281,17 +288,17 @@ def build_ledger_doc(index: int, ledger: Dict[str, Any], num_transactions: int,
                      now: datetime) -> Dict[str, Any]:
     """Mapped header fields, then every other field of `ledger` except `transactions`
     (stored per transaction), losslessly."""
-    block_hash = _require(ledger, "ledger_hash", index)
+    block_hash = _require_hash(ledger, "ledger_hash", index)
     doc = {
         "block_number": index,
-        "block_hash": str(block_hash),
+        "block_hash": block_hash,
         "close_time": to_int(ledger.get("close_time", 0)) or 0,
         "close_time_human": ledger.get("close_time_human", ""),
         "close_time_iso": close_time_iso(to_int(ledger.get("close_time", 0)) or 0),
         "total_coins": to_int(ledger.get("total_coins")),
-        "parent_hash": str(_require(ledger, "parent_hash", index)),
-        "account_hash": str(_require(ledger, "account_hash", index)),
-        "transaction_hash": str(_require(ledger, "transaction_hash", index)),
+        "parent_hash": _require_hash(ledger, "parent_hash", index),
+        "account_hash": _require_hash(ledger, "account_hash", index),
+        "transaction_hash": _require_hash(ledger, "transaction_hash", index),
         "num_transactions": num_transactions,
         "_inserted_at": now,
     }
@@ -344,7 +351,10 @@ def flatten_transactions(block_number: int, block_hash: str, close_time: int,
             raise MalformedLedger(f"ledger {block_number}: transaction is not an object: {tx!r}")
 
         meta_key = _meta_key(tx)
-        meta = tx[meta_key] if meta_key else {}
+        if meta_key is None or not isinstance(tx[meta_key].get("TransactionResult"), str):
+            raise MalformedLedger(
+                f"ledger {block_number}: transaction metadata has no string TransactionResult")
+        meta = tx[meta_key]
         tx_json = tx.get("tx_json") if isinstance(tx.get("tx_json"), dict) else None
         # stored elsewhere: meta in the meta collection, tx_json merged below. Anything else
         # (a second meta, a non-object tx_json) is merged as a field so nothing is dropped.

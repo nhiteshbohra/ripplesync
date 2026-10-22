@@ -25,12 +25,18 @@ URI_FILE_MAX_BYTES = 4096
 # '#'), but never past whitespace (next token) or '?' (an '@' in the query is not userinfo).
 # A '@' in a path without '?' over-redacts, which hides text but never leaks it.
 _USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^\s?]*@", re.IGNORECASE)
+_URL_QUERY = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s?]+)\?([^\s]*)", re.IGNORECASE)
 
 
 def redact_url(text: str) -> str:
-    """Drop `user:pass@` from every URL in `text` (one URL, or a message quoting URLs):
-    ws://user:pass@host:6006 -> ws://host:6006. For logs, errors and stored reasons."""
-    return _USERINFO.sub(r"\1", text)
+    """Hide userinfo and query values in every URL in a log/error string."""
+    text = _USERINFO.sub(r"\1", text)
+
+    def hide_query(match: re.Match) -> str:
+        count = len([part for part in match.group(2).split("&") if part])
+        return f"{match.group(1)}?<{count} option(s) hidden>"
+
+    return _URL_QUERY.sub(hide_query, text)
 
 
 def setup_logging(level: str) -> None:
@@ -143,7 +149,9 @@ class Config:
             servers = tuple(s for s in re.split(r"[,\s]+", raw_servers.strip("\"' ")) if s)
             bad = [s for s in servers if not s.startswith(("ws://", "wss://"))]
             if not servers or bad:
-                errors.append(f"SERVERS entries must start with ws:// or wss:// (bad: {bad or 'none given'})")
+                shown = [redact_url(s) for s in bad]
+                errors.append(f"SERVERS entries must start with ws:// or wss:// "
+                              f"(bad: {shown or 'none given'})")
                 servers = DEFAULT_SERVERS
 
         net_raw = (env.get("EXPECTED_NETWORK_ID") or "").strip().lower()
@@ -194,6 +202,11 @@ class Config:
                  cfg.failed_collection, cfg.metadata_collection]
         if len(set(names)) != len(names):
             errors.append("collection names must all be different")
+        if not cfg.db_name or any(c in cfg.db_name for c in '/\\. "$*<>:|?\0'):
+            errors.append("DB_NAME is empty or contains a character MongoDB forbids")
+        for name in names:
+            if not name or "\0" in name or "$" in name or name.startswith("system."):
+                errors.append(f"collection name {name!r} is invalid in MongoDB")
         if errors:
             raise ConfigError("; ".join(errors))
         return cfg
@@ -245,12 +258,7 @@ PATH_ENV_VARS = ("XRPL_INGEST_HOME", "ENV_FILE")
 
 def redact_mongo_uri(uri: str) -> str:
     """For display: credentials removed and the query string (may hold secrets) hidden."""
-    shown = redact_url(uri)
-    base, sep, query = shown.partition("?")
-    if not sep:
-        return shown
-    n = len([q for q in query.split("&") if q])
-    return f"{base}?<{n} option(s) hidden>"
+    return redact_url(uri)
 
 
 def display_value(cfg: "Config", field_name: str) -> str:

@@ -17,7 +17,15 @@ def cli_main(monkeypatch, cfg, store, tmp_path, isolated_environ):
     monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: [])
     monkeypatch.setattr(cli.MongoStore, "from_config", lambda _cfg, **kw: store)
     monkeypatch.setattr(cli.MongoStore, "close", lambda self: None)
-    return cli.main
+
+    def main(args):
+        if args[0] != "verify":
+            return cli.main(args)
+        with monkeypatch.context() as patch:
+            patch.setattr(cli, "FIRST_LEDGER", 1)  # compact synthetic ledger fixtures
+            return cli.main(args)
+
+    return main
 
 
 @pytest.fixture
@@ -277,6 +285,13 @@ def test_tx_node_unreachable_exits_4(cli_main, monkeypatch, store):
 def test_tx_other_node_error_exits_4(cli_main, node, store):
     node.tx_script = {TXH: [RpcError("tooBusy")]}
     assert cli_main(["tx", "--hash", TXH]) == 4
+
+
+def test_tx_empty_success_response_exits_4(cli_main, node, store, capsys):
+    store_v2_payment(store)
+    node.tx_script = {TXH: [{}]}
+    assert cli_main(["tx", "--hash", TXH]) == 4
+    assert "malformed empty tx result" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("value", ["", "xyz", "A" * 63, "A" * 65, "G" * 64])

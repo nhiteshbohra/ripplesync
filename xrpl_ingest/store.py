@@ -103,11 +103,19 @@ class MongoStore:
             self.ledgers.bulk_write(
                 [ReplaceOne({"block_number": d["block_number"]}, d, upsert=True)
                  for d, _, _ in bundles], ordered=False)
+        if bundles:
+            self.failed.delete_many({"block_number": {"$in": [d["block_number"] for d, _, _ in bundles]}})
 
     def highest_ledger(self) -> int:
         """Highest stored block_number (0 if none); uses the unique block_number index."""
         doc = self.ledgers.find_one({}, {"block_number": 1}, sort=[("block_number", DESCENDING)])
-        return int(doc["block_number"]) if doc else 0
+        if not doc:
+            return 0
+        value = doc.get("block_number")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError("Invalid block_number in ledger collection; repair or remove the "
+                              "damaged document after checking it against the node")
+        return value
 
     # -- live-tail checkpoint ----------------------------------------------------
 
@@ -172,6 +180,12 @@ class MongoStore:
     def list_failed_with_reasons(self) -> List[Tuple[int, str]]:
         docs = self.failed.find({}, {"block_number": 1, "reason": 1})
         return sorted((d["block_number"], str(d.get("reason", ""))) for d in docs)
+
+    def failed_page(self, after: int, limit: int) -> List[Tuple[int, str]]:
+        docs = self.failed.find({"block_number": {"$gt": after}},
+                                {"block_number": 1, "reason": 1}).sort(
+                                    "block_number", ASCENDING).limit(limit)
+        return [(d["block_number"], str(d.get("reason", ""))) for d in docs]
 
     def count_failed(self) -> int:
         return self.failed.count_documents({})

@@ -48,6 +48,12 @@ class MalformedLedger(IngestError):
 # Errors from the node that are worth retrying. Everything else (lgrNotFound,
 # invalidParams, ...) is permanent for that request.
 RETRYABLE_RPC_ERRORS = frozenset({"slowDown", "noNetwork", "noCurrent", "noClosed", "tooBusy"})
+# These describe a command/permission mismatch, not one bad ledger. Continuing would
+# record every ledger as failed and could mark an empty backfill chunk complete.
+FATAL_RPC_ERRORS = frozenset({
+    "commandMissing", "invalidParams", "invalid_API_version", "noPermission",
+    "notEnabled", "reportingUnsupported", "unknownCmd",
+})
 
 
 class RpcError(IngestError):
@@ -59,6 +65,10 @@ class RpcError(IngestError):
     @property
     def retryable(self) -> bool:
         return self.error in RETRYABLE_RPC_ERRORS
+
+    @property
+    def fatal(self) -> bool:
+        return self.error in FATAL_RPC_ERRORS
 
 
 def is_retryable(exc: BaseException) -> bool:

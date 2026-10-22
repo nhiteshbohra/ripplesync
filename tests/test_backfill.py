@@ -44,6 +44,14 @@ def test_chunk_with_failures_still_marked_done_and_failures_recorded(store):
     assert store.done_chunks(0, 100) == {(10, 19)}
 
 
+def test_systemic_rpc_error_aborts_chunk_without_marking_or_recording(store):
+    src = FakeSource({10: [RpcError("noPermission")]})
+    with pytest.raises(RpcError, match="noPermission"):
+        chunk_run(src, store, (10, 12), concurrency=1)
+    assert store.done_chunks(0, 100) == set()
+    assert store.list_failed() == []
+
+
 def test_stop_flag_halts_chunk_and_leaves_it_unmarked(store):
     src = FakeSource()
     seen = {"n": 0}
@@ -84,6 +92,14 @@ def test_run_backfill_partial_resume_only_redoes_missing_chunks(cfg, store):
     src2 = FakeSource(latest=hi, ranges=f"{lo}-{hi}")
     summary = run_backfill(cfg, lo, hi, source=src2, store=store, inline=True)
     assert summary["chunks_run"] == 1 and sorted(src2.calls) == list(range(32580, 32590))
+
+
+def test_successful_backfill_clears_stale_failure(cfg, store):
+    lo = 32570
+    store.record_failure(lo, "old failure")
+    src = FakeSource(latest=lo, ranges=str(lo))
+    summary = run_backfill(cfg, lo, lo, source=src, store=store, inline=True)
+    assert summary["ledgers_ok"] == 1 and store.list_failed() == []
 
 
 def test_run_backfill_skips_ledgers_node_does_not_have(cfg, store):
@@ -248,6 +264,26 @@ def test_retry_failed_runs_ordinary_failures_concurrently_first(store, monkeypat
     src = FakeSource()
     assert run(retry_failed(src, store, FAST_RETRY, max_rounds=1, sleep=no_sleep)) == 0
     assert src.calls[-1] == 5 and sorted(src.calls[:2]) == [6, 7]
+
+
+def test_retry_failed_reads_failures_in_bounded_pages(store, monkeypatch):
+    sizes = []
+
+    def page(after, limit):
+        rows = [(idx, "RpcError: lgrNotFound")
+                for idx in range(after + 1, min(1202, after + limit + 1))]
+        sizes.append(len(rows))
+        return rows
+
+    async def reingest(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(store, "count_failed", lambda: 1201)
+    monkeypatch.setattr(store, "failed_page", page)
+    monkeypatch.setattr(backfill, "_reingest", reingest)
+    assert run(retry_failed(FakeSource(), store, FAST_RETRY, max_rounds=1,
+                            concurrency=4, sleep=no_sleep)) == 1201
+    assert max(sizes) <= 1000 and 1000 in sizes
 
 
 def test_chunk_with_unrecorded_failure_is_not_marked_done(store, monkeypatch):

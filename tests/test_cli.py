@@ -2,7 +2,7 @@ import dataclasses
 import os
 
 import pytest
-from pymongo.errors import InvalidURI, ServerSelectionTimeoutError
+from pymongo.errors import InvalidURI, OperationFailure, ServerSelectionTimeoutError
 
 from conftest import FakeSource
 from xrpl_ingest import __version__, cli
@@ -12,6 +12,22 @@ from xrpl_ingest.errors import ConnectFailed, NetworkMismatch
 from xrpl_ingest.support.runcontrol import InstanceLock, lock_path
 
 CLEAN = {"ledgers_failed": 0, "chunks_incomplete": 0, "unavailable_ranges": []}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "bad"])
+def test_retry_failed_rejects_nonpositive_rounds(cli_main, value):
+    with pytest.raises(SystemExit) as error:
+        cli_main(["retry-failed", "--max-rounds", value])
+    assert error.value.code == 2
+
+
+def test_mongo_auth_errors_are_configuration_errors():
+    assert cli.error_exit_code(OperationFailure("unauthorized", code=13)) == 2
+
+
+def test_verify_rejects_pre_history_range(cli_main, capsys):
+    assert cli_main(["verify", "--start", "1", "--end", "2"]) == 2
+    assert "32570" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("changes,code", [
