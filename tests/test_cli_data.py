@@ -11,6 +11,10 @@ from xrpl_ingest.transform import parse_ledger_result
 
 @pytest.fixture
 def cli_main(monkeypatch, cfg, store, tmp_path, isolated_environ):
+    # Data-command tests isolate command behavior; startup readiness has separate coverage.
+    async def ready(*args):
+        pass
+    monkeypatch.setattr(cli, "_check_node_ready", ready)
     monkeypatch.chdir(tmp_path)  # no .env here
     monkeypatch.setattr(cli.Config, "from_env", staticmethod(
         lambda env=None, **kw: dataclasses.replace(cfg, process_status_file=str(tmp_path / "stop.txt"))))
@@ -107,7 +111,7 @@ def test_verify_repair_respects_stop_file(cli_main, node, store, tmp_path, capsy
     (tmp_path / "stop.txt").write_text("current_process=0")
     assert cli_main(["verify", "--start", "1", "--end", "3", "--repair"]) == 1
     assert node.calls == [] and "stopped early" in capsys.readouterr().out
-    assert node.stop_checks and node.stop_checks[0]() is True  # source gets the stop check too
+    assert node.stop_checks == []  # startup stop prevents opening any node connection
 
 
 def test_plain_verify_unchanged_needs_no_node(cli_main, dead_node, store, capsys):

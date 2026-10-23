@@ -1139,6 +1139,17 @@ Each line looks like `NAME = value    [source]`. The source is `env`, `.env`, `e
 
 ### 5.6 Run `doctor`
 
+Commands started through `python -m xrpl_ingest` check node readiness before
+`backfill`, `tail`, `retry-failed`, `fetch`, `tx`, and `verify --repair` do work.
+The node must report `full`, `proposing`, or `validating`, a positive validated
+ledger number, and an available ledger range containing that ledger. If it is
+still syncing, the command exits with code 4 and asks you to wait a few minutes
+and run it again. A ready node can still lack older ledgers requested for backfill;
+the existing range check reports those separately.
+`doctor`, `status`, `health`, `config`, and verification without repair remain
+available for diagnosis/offline checks while the node syncs. No interactive menu
+or automatic wait loop is added.
+
 ```bash
 python -m xrpl_ingest doctor
 ```
@@ -1252,6 +1263,55 @@ backfill range 32570-105000300 (file /opt/xrpl-ingest/backfill_range.txt): chunk
 ### 6.3 Command reference
 
 Run every command as `python -m xrpl_ingest <command>`. `--help` works on every command and lists the exit codes.
+
+#### Files in `xrpl_ingest` and their direct commands
+
+Run these commands from the project root with the virtual environment active and
+your `.env` configured. All paths below are relative to `xrpl_ingest/`; the table
+includes its `support/` files. Replace `N` and `M` with actual ledger numbers
+(`N <= M`, both available on your node), and `H` with a transaction's 64-digit hex
+hash. The command column shows the supported CLI for the feature; internal files
+are called by that CLI and have no standalone command. Use the package entry point
+rather than `python xrpl_ingest/backfill.py` or `python -m xrpl_ingest.backfill`.
+
+| File | What it does | Direct command / how it runs |
+|---|---|---|
+| `__main__.py` | Starts the package and calls the main CLI. | `python -m xrpl_ingest --help`; append a command below to run work. |
+| `__init__.py` | Defines the package and its version. | Internal; loaded automatically. |
+| `cli.py` | Parses commands, loads settings, checks node readiness, manages locks and dispatches work. | `python -m xrpl_ingest --help`; all commands below pass through this file. |
+| `backfill.py` | Copies historical ledgers in resumable chunks; retries recorded failed ledgers. | `python -m xrpl_ingest backfill --start N --end M`; `python -m xrpl_ingest retry-failed` |
+| `tail.py` | Follows validated ledgers and saves ingestion progress. | `python -m xrpl_ingest tail` |
+| `fetcher.py` | Fetches, transforms and saves ledgers with retries and failure recording. | `python -m xrpl_ingest fetch --ledger N` or `python -m xrpl_ingest fetch --ledger validated` |
+| `repair.py` | Checks ledger chains and transaction hashes, repairs ledger problems, and compares transaction fields. | `python -m xrpl_ingest verify --start N --end M --deep --repair`; `python -m xrpl_ingest tx --hash H` |
+| `config.py` | Validates settings, resolves configured paths, and redacts connection credentials. | `python -m xrpl_ingest config` |
+| `source.py` | Connects to XRPL WebSocket servers, checks network ID, and requests node data. | Internal; used by node commands, including `python -m xrpl_ingest status`. |
+| `store.py` | Writes ledger/transaction data to MongoDB; manages indexes, checkpoints, chunk progress and stored-data checks. | Internal; used by ingestion and `python -m xrpl_ingest verify --start N --end M`. |
+| `transform.py` | Converts node ledger/transaction responses into MongoDB documents. | Internal; runs automatically during ingestion. |
+| `ledger_ranges.py` | Parses available ledger ranges and plans backfill chunks. | Internal; runs automatically during status, readiness and backfill checks. |
+| `errors.py` | Defines errors and classifies retryable failures. | Internal; used automatically by commands. |
+| `support/__init__.py` | Defines the support package. | Internal; loaded automatically. |
+| `support/doctor.py` | Checks configuration, runtime packages, paths, MongoDB and node health; displays effective settings. | `python -m xrpl_ingest doctor`; node only: `python -m xrpl_ingest doctor --node`; MongoDB only: `python -m xrpl_ingest doctor --mongo` |
+| `support/monitor.py` | Checks ingestion lag/checkpoint age and guards against low disk space. | `python -m xrpl_ingest health`; disk guard runs automatically when `MIN_FREE_GB` is configured. |
+| `support/files.py` | Loads `.env` and range files; resolves base paths and formats range progress. | Internal; range progress: `python -m xrpl_ingest status`. |
+| `support/runcontrol.py` | Handles stop files, stop signals and per-command instance locks. | Internal; active automatically during commands. |
+| `support/logsetup.py` | Configures logging, rotating files, worker log forwarding and progress output. | Internal; active automatically according to `.env` logging settings. |
+
+**Direct commands also check sync first.** For example,
+`python -m xrpl_ingest backfill --start N --end M` reaches the same main CLI
+readiness check as `tail`, `retry-failed`, `fetch`, `tx`, and `verify --repair`.
+Before doing command work, it checks for a synced node state (`full`, `proposing`,
+or `validating`), a positive validated ledger number, and an available range
+containing that ledger. If the node is still syncing, it stops with exit `4`:
+
+```text
+XRPL node is not synced yet (...). Please wait a few minutes for it to sync,
+then run this command again. Check progress with: python -m xrpl_ingest doctor --node
+```
+
+`doctor`, `status`, `health`, `config`, and `verify` without `--repair` remain
+available for troubleshooting and offline checks while syncing. There is no
+automatic wait loop. Being synced to the current ledger does not mean the node
+holds all historical ledgers; backfill separately checks the requested range.
 
 | Command | What it does | Example |
 |---|---|---|

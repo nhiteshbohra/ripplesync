@@ -24,6 +24,7 @@ from .config import Config
 from .config import FIRST_LEDGER
 from .support.monitor import DiskGuard, LowDiskSpace
 from .errors import ConfigError, IngestError, NetworkMismatch
+from .ledger_ranges import parse_complete_ledgers
 from .support.runcontrol import InstanceLock, LockHeld, lock_path
 from .support.logsetup import setup_logging
 from .source import WsSource
@@ -251,6 +252,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_INTERNAL
 
 
+async def _check_node_ready(cfg: Config, stop) -> None:
+    source = WsSource.from_config(cfg, stop_check=stop)
+    try:
+        info = await source.server_info()
+        try:
+            ranges = parse_complete_ledgers(info.get("complete_ledgers", ""))
+        except ValueError as e:
+            raise IngestError(f"node returned malformed complete_ledgers: {e}") from None
+        latest = info.get("validated_ledger", {}).get("seq", 0)
+        state = info.get("server_state", "unknown")
+        if (state not in ("full", "proposing", "validating")
+                or not isinstance(latest, int) or isinstance(latest, bool) or latest <= 0
+                or not any(a <= latest <= b for a, b in ranges)):
+            raise IngestError(
+                f"XRPL node is not synced yet (state {state}, latest validated {latest}). "
+                "Please wait a few minutes for it to sync, then run this command again. "
+                "Check progress with: python -m xrpl_ingest doctor --node")
+        log.info("node ready: state %s, latest validated %s", state, latest)
+    finally:
+        await source.close()
+
+
 def _main(args: argparse.Namespace, command: Command) -> int:
     try:
         env = files.load_env()
@@ -287,6 +310,12 @@ def _main(args: argparse.Namespace, command: Command) -> int:
                         else (lambda: stop_requested(path)))
         if command.ingest:
             lock = _acquire_lock(base, args.command)
+        if (command.ingest or args.command in ("fetch", "tx")
+                or (args.command == "verify" and args.repair)):
+            if run.stop():
+                print("stopped early; command was not started")
+                return EXIT_FAILED
+            asyncio.run(_check_node_ready(cfg, run.stop))
         return command.run(run)
     except LockHeld as e:
         print(f"error: {e}", file=sys.stderr)

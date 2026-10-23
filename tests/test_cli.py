@@ -191,6 +191,10 @@ def test_start_line_logs_version_and_resolved_paths(isolated_environ, monkeypatc
 
 @pytest.fixture
 def cli_main(monkeypatch, cfg, store, tmp_path, isolated_environ):
+    # Dispatch tests isolate command behavior; startup readiness is covered in test_node_readiness.
+    async def ready(*args):
+        pass
+    monkeypatch.setattr(cli, "_check_node_ready", ready)
     monkeypatch.chdir(tmp_path)  # no .env here; lock files go here
     monkeypatch.setattr(cli.Config, "from_env", staticmethod(lambda env=None, **kw: cfg))
     monkeypatch.setattr(cli, "setup_logging", lambda *a, **k: [])
