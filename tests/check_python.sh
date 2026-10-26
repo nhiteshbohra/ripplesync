@@ -68,14 +68,18 @@ warn() { echo "WARN $*" >&2; }
 die() { echo "ERROR $*" >&2; exit 1; }
 . <(sed -n '/^ask() {/,/^}/p' "$project/install.sh")
 # Redirect discovery paths into the sandbox without changing the user's HOME.
-. <(sed -e 's/\$HOME/\$MOCK_ROOT/g' \
+mkdir -p "$work/repo/setup"
+cp "$project/install.sh" "$work/repo/"
+cp "$project/setup/db_path_guard.sh" "$work/repo/setup/"
+sed -e 's/\$HOME/\$MOCK_ROOT/g' \
     -e 's|/opt/homebrew/opt|$MOCK_ROOT/homebrew/opt|g' \
-    -e 's|/usr/local/opt|$MOCK_ROOT/local/opt|g' "$project/setup/common.sh")
+    -e 's|/usr/local/opt|$MOCK_ROOT/local/opt|g' "$project/setup/common.sh" >"$work/repo/setup/common.sh"
+. "$work/repo/setup/common.sh"
 REPO_DIR="$work/repo" SUDO= YES=0 CHECK_ONLY=0
 
 # --check must not install, build a venv, or run --trial's data checks.
-bash "$project/install.sh" --check --trial >"$work/check.log" 2>&1
-grep 'Python 3.12: missing, would be installed with uv' "$work/check.log"
+bash "$REPO_DIR/install.sh" --check --trial >"$work/check.log" 2>&1 || { cat "$work/check.log"; exit 1; }
+grep 'Python 3.12: missing, would be installed with uv' "$work/check.log" || { cat "$work/check.log"; exit 1; }
 [ ! -e "$work/actions" ] && [ ! -e "$REPO_DIR/.venv" ]
 echo 'PASS --check --trial: read-only, reports uv'
 
@@ -127,6 +131,10 @@ echo 'PASS macOS Homebrew method'
 mkdir -p "$work/pyenv/shims" "$work/managed"
 cp "$work/bin/python-stub" "$work/pyenv/shims/python3.12"
 mv "$work/bin/python3.12" "$work/managed/python3.12"
+# Mask the host interpreter and the already-tested venv for isolated lookup checks.
+printf '#!/usr/bin/env bash\nexit 1\n' >"$work/bin/python3.12"
+chmod +x "$work/bin/python3.12"
+printf '3.14\n' >"$REPO_DIR/.venv/bin/python.version"
 PYENV_ROOT="$work/pyenv" find_python312
 [ "$PYTHON" = "$work/pyenv/shims/python3.12" ]
 export MOCK_UV_PYTHON="$work/managed/python3.12"
@@ -141,3 +149,18 @@ if (make_venv) <<< n; then exit 1; fi
 version_ge 3.12 3.10
 ! version_ge 3.9 3.10
 echo 'PASS declined rebuild preserves old venv; numeric version comparison'
+
+# A copied venv can run its interpreter while activation still points at the old folder.
+printf '3.12\n' >"$REPO_DIR/.venv/bin/python.version"
+printf 'VIRTUAL_ENV=/old/copied/repo/.venv\n' >"$REPO_DIR/.venv/bin/activate"
+if (make_venv) <<< n; then exit 1; fi
+[ -f "$REPO_DIR/.venv/bin/activate" ]
+make_venv <<< ''
+[ ! -f "$REPO_DIR/.venv/bin/activate" ]  # the stub venv builder has no activation script
+[ "$("$REPO_DIR/.venv/bin/python" -c version)" = 3.12 ]
+echo 'PASS relocated venv: refusal preserves files; acceptance backs up and rebuilds'
+ln -s "$REPO_DIR" "$work/repo-alias"
+printf 'VIRTUAL_ENV=%s/.venv\n' "$work/repo-alias" >"$REPO_DIR/.venv/bin/activate"
+make_venv </dev/null
+[ -f "$REPO_DIR/.venv/bin/activate" ]
+echo 'PASS symlink alias of the same venv is reused'

@@ -7,7 +7,7 @@ It copies the old history ("backfill") and follows new ledgers live ("tail").
 **Start here:** [Choose how to set up](#choose-how-to-set-up). There is an **automatic** installer for Linux and for Windows, and every step is also written out for a **manual** setup.
 
 > **Status:** the code is tested with unit tests, a fake node and a local MongoDB, and a small trial ran on real mainnet data from public servers (Windows, 2026-10-19; see [Manual test on a small computer](#manual-test-on-a-small-computer)).
-> It has **not yet run against your own xrpld node** or on a large range, and the installers are not yet tested on a real Ubuntu host. See [Not verified yet](#not-verified-yet).
+> Real local-node CLI trials also passed on WSL, including recovery and live ingestion. Large ranges, production-length runs and a fresh Ubuntu installation remain unverified. See [Not verified yet](#not-verified-yet).
 > Text marked **UNVERIFIED** comes from documentation or reasoning, not from a test on real hardware.
 
 ## Table of contents
@@ -49,7 +49,7 @@ First pick **what** you want to run, then **how** you want to install it.
 
 | Setup | What you get | What it needs |
 |---|---|---|
-| **test** (Linux) | **The server setup in small.** Your own node, MongoDB, this program, the same settings and the same services as the server. Only the node is small: it keeps the recent ledgers (about 2 hours, ~1 GB). The installer then checks that real data arrives: live `tail`, `backfill`, `verify`. | 16 GB RAM, 4 CPU cores, 50 GB SSD (xrpl.org minimum for testing). 8 GB RAM works, slower. |
+| **test** (Linux) | **The server setup in small.** Your own node, MongoDB, this program, the same settings and the same services as the server. Only the node is small: it keeps recent ledgers (about 2 hours) plus the ledger state. The installer then checks that real data arrives: live `tail`, `backfill`, `verify`. | 16 GB RAM, 4 CPU cores, 50 GB SSD (xrpl.org minimum for testing). Below 16 GB, initial sync may be very slow or fail to catch up. |
 | **server** (Linux) | The real thing: your own full-history node and the whole history in MongoDB. | Linux server, 64 GB RAM, 8+ cores, ~39 TB NVMe with XFS. See [Requirements](#requirements) |
 | **test** (Windows) | The node cannot run on Windows, so the test reads a little real data from public XRPL servers. | Any Windows 10 / 11 computer |
 | **connect** (Windows) | This program on Windows, the node on a Linux machine. | A node you can reach from Windows |
@@ -92,7 +92,7 @@ an incompatible `.venv`.
 
 For manual commands, see [Create and use the virtual environment](#53-create-and-use-the-virtual-environment).
 
-Installer self-check: `bash setup/check_python.sh` exercises the Python choices and
+Installer self-check: `bash tests/check_python.sh` exercises the Python choices and
 venv replacement using stubs; it does not install Python or modify your services.
 
 ### Get the code
@@ -288,7 +288,7 @@ If they show as skipped, MongoDB is not reachable at `mongodb://127.0.0.1:27017`
 A normal computer cannot hold a full-history node. For a small test you have two choices for the "node":
 
 - **A. A public mainnet server (easiest, any OS; what the Windows installer uses).** Public servers such as `wss://s2.ripple.com` and `wss://xrplcluster.com` have the full history and accept the same requests. They **rate-limit** clients, so use them only for a few hundred ledgers with low speed settings. This is a test only; for real ingestion use your own node (that is why this program exists).
-- **B. A small node of your own (Linux or WSL2 only; what the Linux installer uses, the same as the server in small).** xrpld that keeps only recent ledgers (*pruned*) fits on a normal disk: about 1 GB for its database. xrpl.org asks for 16 GB RAM, 4 CPU cores and 50 GB SSD even for testing. Automatic: `bash install.sh --mode test`. By hand: install xrpld ([Step 1](#step-1-install-the-node-xrpld)), then set it to pruned with the same tool the installer uses (a backup is kept):
+- **B. A small node of your own (Linux or WSL2 only; what the Linux installer uses, the same as the server in small).** xrpld keeps only recent ledgers (*pruned*), but still needs the ledger state: do not budget just 1 GB. The WSL test database exceeded 7 GB before its first validated ledger. xrpl.org asks for 16 GB RAM, 4 CPU cores and 50 GB SSD even for testing. Automatic: `bash install.sh --mode test`. By hand: install xrpld ([Step 1](#step-1-install-the-node-xrpld)), then set it to pruned with the same tool the installer uses (a backup is kept):
   ```bash
   sudo python3 setup/edit_cfg.py /etc/xrpld/xrpld.cfg --db-path /var/lib/xrpld/db/nudb --history pruned --node-size medium
   sudo python3 setup/xrpld_check.py check        # validator settings correct?
@@ -508,6 +508,9 @@ To change only the node config, use the same tools by hand (a backup is kept; sa
 sudo python3 setup/edit_cfg.py /etc/xrpld/xrpld.cfg --db-path /data/xrpld/db/nudb --history full --node-size huge
 sudo python3 setup/xrpld_check.py check      # validator settings correct?
 ```
+
+The config helper adds `[network_id]` `0` (mainnet) when the stanza is missing;
+it preserves an existing explicit network setting.
 
 `DB_PATH` must be a dedicated folder. The installer runs `chown -R` on it, so `setup/db_path_guard.sh` refuses system folders and anything under `/home`, `/root` or `/run/user` (the xrpld service cannot see those, because of `ProtectHome=true`).
 
@@ -1018,6 +1021,11 @@ pip install -r requirements.txt
 `requirements.txt` is the only install file. It contains the runtime and the test packages.
 There is no installable package and no short command: always run the program as `python -m xrpl_ingest ...` with the venv active (or with `.venv/bin/python`, `.venv\Scripts\python.exe`).
 
+When moving the project to another folder, recreate `.venv` at the new location;
+copied activation scripts and command launchers retain the old absolute path.
+The Linux installer detects an activation path mismatch and offers its existing
+backup/rebuild workflow, even when the copied interpreter reports Python 3.12.
+
 Activate the venv again in every new terminal (`source .venv/bin/activate` on
 Linux/macOS, `.\.venv\Scripts\Activate.ps1` in PowerShell). With `.env` configured:
 
@@ -1146,6 +1154,9 @@ ledger number, and an available ledger range containing that ledger. If it is
 still syncing, the command exits with code 4 and asks you to wait a few minutes
 and run it again. A ready node can still lack older ledgers requested for backfill;
 the existing range check reports those separately.
+For public Clio servers, which omit `server_state`, the readiness check asks
+their connected xrpld for its state using `server_info` with `ledger_index=current`.
+Clio's own available range must still contain its validated ledger.
 `doctor`, `status`, `health`, `config`, and verification without repair remain
 available for diagnosis/offline checks while the node syncs. No interactive menu
 or automatic wait loop is added.
@@ -1300,8 +1311,11 @@ rather than `python xrpl_ingest/backfill.py` or `python -m xrpl_ingest.backfill`
 `python -m xrpl_ingest backfill --start N --end M` reaches the same main CLI
 readiness check as `tail`, `retry-failed`, `fetch`, `tx`, and `verify --repair`.
 Before doing command work, it checks for a synced node state (`full`, `proposing`,
-or `validating`), a positive validated ledger number, and an available range
-containing that ledger. If the node is still syncing, it stops with exit `4`:
+or `validating`), a positive validated ledger number, and availability of that
+ledger. For a native node whose advertised disk range omits the validated tip,
+it asks for that exact ledger and checks its validated flag, number and transaction
+hash list. Clio still requires coverage in its own advertised range. If the node
+is still syncing, it stops with exit `4`:
 
 ```text
 XRPL node is not synced yet (...). Please wait a few minutes for it to sync,
@@ -1603,8 +1617,8 @@ to be evaluated separately from ingestion throughput; their retired indexes are 
 To compare the previous steady-state flow with the pipeline on your machine:
 
 ```bash
-python setup/benchmark_ingest.py --ledgers 300 --transactions 20 --repeats 3 --compare
-python setup/benchmark_ingest.py --ledgers 100 --transactions 200 --repeats 3 --compare
+python tests/benchmark_ingest.py --ledgers 300 --transactions 20 --repeats 3 --compare
+python tests/benchmark_ingest.py --ledgers 100 --transactions 200 --repeats 3 --compare
 ```
 
 The benchmark uses a synthetic node in a separate process and a real MongoDB at
@@ -1925,25 +1939,127 @@ Stay on 7.0 or 8.0. Do not move to 9.0 until `requirements.txt` allows a driver 
 
 ## Not verified yet
 
-Be honest about what is tested. These points come from documentation or reasoning, **not** from a run on real hardware:
+Completed trials and remaining limits are listed together below. A successful small run covers only that environment and range.
 
-- The program has **never run against its own xrpld node** (admin websocket on `127.0.0.1:6006`). Tests use a fake node (`tests/fake_xrpld.py`) and a local MongoDB.
-- Real data was tested only in a small trial (2026-10-19, Windows, public servers `wss://s2.ripple.com` / `wss://xrplcluster.com`): 200 early ledgers (32570-32769), about 15 recent ledgers with transactions (around ledger 107,758,500), `verify`, `tx`, `tail`, `health`. Large ranges, busy historical periods and long runs are not tested.
+- Local xrpld CLI acceptance passed on WSL: 26 ledgers / 3,877 transactions, including backfill/resume, lossless storage, fetch/tx, deep verify/repair, retry-failed, live tail, locks and graceful stops. A local transient service tail startup exposed a validated-tip coverage rejection; the shared guard now has the direct-ledger check described above. Its real-node service rerun is pending resync. Automated integration tests separately use a fake node (`tests/fake_xrpld.py`) and real MongoDB.
+- Real data trials: 2026-10-19 on Windows, public servers `wss://s2.ripple.com` / `wss://xrplcluster.com`, 200 early ledgers (32570-32769) and about 15 recent ledgers; 2026-10-24 on WSL, `wss://s1.ripple.com`, 27 ledgers / 2,350 transactions with raw-field storage checks, backfill/resume, fetch, tx, deep verify/repair, failed-ledger recovery, tail/health and interruption tests. Temporary systemd services also stored/deeply verified real data. Large ranges, every transaction type and production-length runs remain untested.
 - The API v2 `ledger` answer shape (`tx_json` + `meta`, `DeliverMax`) is taken from xrpld 3.4.1 source and docs; the trial above stored real answers without errors, but not every transaction type was checked by hand.
-- Whether a mainnet node reports `network_id` without `[network_id]` in its config (source code says: only when configured).
+- The tested native node omitted `network_id` without an explicit setting. Setting `[network_id]` to `0` in its backed-up configuration made it report mainnet correctly; the network guard remains enabled.
 - How the node answers while syncing (`notSynced`, `notReady` errors) and whether those should be retried.
 - Port numbers, stanza names and default values of `xrpld.cfg` (taken from the 3.4.1 example config).
 - `install.sh` (with `setup/common.sh`) is not tested on a real Ubuntu host yet: checked with `bash -n`, shellcheck and a `--check` run. `install.ps1` ran end to end on Windows 11 (2026-10-20) in `test` mode (tests, `doctor`, one real ledger stored), again in `test` mode (nothing changed), and in `connect` mode (`.env` switched, backup kept); Python and MongoDB were already installed there, so the winget install path is not tested yet. The `test` setup's real-data checks (wait for sync, backfill of recent ledgers, 60-second tail) have not run against a real node yet. The tools they use (`setup/edit_cfg.py`, `setup/envfile.py`, `setup/xrpld_check.py`) have unit tests.
-- The service templates `deploy/systemd/xrpl-tail.service`, `deploy/systemd/xrpl-backfill.service` and the Windows scripts `deploy/windows/install-task.ps1` and `run.cmd` are **not tested on a real host** (Task Scheduler behaviour is UNVERIFIED).
-- SIGTERM graceful stop under real systemd.
+- Installed systemd template paths were repaired and verified on WSL; temporary services as `ubuntu` passed real-mainnet backfill, tail, checkpoint and SIGTERM shutdown. The installed ingestion services were left inactive. The Windows scripts `deploy/windows/install-task.ps1` and `run.cmd` still need real Task Scheduler validation.
 - Disk size of MongoDB for full history, and ingest speed (ledgers per second).
 - The full-history disk numbers (39 TB, 12 GB/day) are from xrpl.org (January 2026), not measured by us.
 - The MongoDB 8.0 commands for RHEL and Homebrew (marked UNVERIFIED above).
 - Python package names on RHEL 9.
 - The WiredTiger cache example value.
-- WSL networking advice.
+- Other WSL networking modes: the tested Ubuntu instance reached Windows MongoDB at its LAN address; this does not certify every NAT/mirrored/firewall setup.
 
 ---
+
+## Run the remaining real-data WSL checks without this chat
+
+The local `Ubuntu-24.04` distribution was verified at `G:\WSL-Ubuntu` on
+2026-10-26. Its Linux home remains `/home/ubuntu/ripplesync`; this repository
+remains on F: at `/mnt/f/projects/ripple blockchain`. Moving the WSL virtual disk
+does not change either command path. The resource helper detects the backing
+drive from Windows WSL registration, so the physical-space gate now checks G:
+rather than assuming C:. This move does not establish node stability by itself.
+
+To test the remaining parts separately, use these commands in Ubuntu WSL. Each
+mode keeps separate progress and evidence; passing throughput does not clear a
+failed live-reliability result. Run one mode at a time.
+
+```bash
+cd '/mnt/f/projects/ripple blockchain'
+# Three profiles, without first running an hour of live ingestion:
+sudo /home/ubuntu/ripplesync/.venv/bin/python tests/run_remaining_tests.py throughput
+# Read progress/results from another terminal:
+python3 tests/run_remaining_tests.py status --mode throughput
+cat reviews/real_throughput_latest.json
+# Separately, when ready to attempt the full hour again:
+sudo /home/ubuntu/ripplesync/.venv/bin/python tests/run_remaining_tests.py live
+python3 tests/run_remaining_tests.py status --mode live
+cat reviews/real_live_latest.json
+```
+
+Throughput uses profiles 1 process / concurrency 2, 2 / 4 and 4 / 16. All use
+the same recent ledger range in separate QA databases, with deep verification,
+existing memory/disk gates and fresh-node checks before/after each profile. A
+failure or resource block stops the run. The local node's stability issue is not
+fixed by separating the tests. The old combined run's progress remains unchanged;
+because the harness changed, use the separate commands above rather than resuming
+that old combined run.
+
+`tests/run_remaining_tests.py` runs the retained checks in this workspace, saves
+progress, and stops on the first failure or blocked check. It checks local-node
+readiness and real-data CLI operations, transient systemd backfill/tail/shutdown,
+the installer's real-data trial functions, three interruption/recovery scenarios,
+then a one-hour live run and three throughput profiles. The trial does not test a
+fresh OS/package installation. A successful run is not full-history certification.
+
+This is a local QA tool for the existing setup: Ubuntu user UID 1000, home project
+`/home/ubuntu/ripplesync`, local XRPL HTTP 5005 / WebSocket 6006, and the Windows
+MongoDB address already set in the retained QA harnesses. It does not read the
+project's `.env`. Writes use isolated `xrpl_ingest_test_*` databases, retained for
+inspection. Live/throughput use `tests/wsl_real_sustained.py` and
+`tests/windows_resource_snapshot.ps1`. The combined suite also requires the other
+local `reviews/wsl_real_*.py` harnesses, which are ignored by Git; a fresh clone
+alone does not include those combined-suite checks. A separate server is
+not configured by this command and still needs its connection details.
+
+Open an Ubuntu WSL terminal and run from the current Windows workspace:
+
+```bash
+cd '/mnt/f/projects/ripple blockchain'
+sudo /home/ubuntu/ripplesync/.venv/bin/python tests/run_remaining_tests.py run --wait-seconds 3600
+```
+
+Keep that terminal open and prevent Windows sleep. The foreground WSL session
+keeps the runner independent of this chat; shutting down Windows or WSL stops it.
+Start your existing XRPL node first if it is stopped. The runner waits up to one
+hour for initial sync, then stops as blocked if sync has not completed. It does
+not tune or restart the node. Budget additional time for the real tests once ready.
+The home code and `install.sh` must match this workspace; otherwise preflight
+refuses to test stale code rather than copying over existing work.
+
+In another WSL terminal:
+
+```bash
+cd '/mnt/f/projects/ripple blockchain'
+python3 tests/run_remaining_tests.py status
+# Follow the log path printed by the runner or shown in status:
+tail -f reviews/remaining_sync-and-real-cli_*.log
+```
+
+Status records `running`, `passed`, `failed`, `blocked` or `interrupted`, the
+completed stages, and a separate log for each attempt. On Linux it checks the
+runner's lock so a stale running record is shown as interrupted. The final stage's
+live samples and measured profile rates remain in `reviews/real_sustained_latest.json`
+and its referenced evidence directory. No benchmark is counted as passed when its
+resource gate blocks it.
+
+After fixing the reported cause, resume unchanged code with:
+
+```bash
+sudo /home/ubuntu/ripplesync/.venv/bin/python tests/run_remaining_tests.py resume --wait-seconds 3600
+```
+
+Resume skips completed stages; it creates fresh QA databases for rerun stages.
+Code changes require a fresh `run`. Stop with Ctrl+C once and allow cleanup to
+finish. A forced-cleanup warning requires inspecting owned QA jobs before a fresh
+run. Keep this runner as the only active real-data QA workflow so its shared
+evidence files are not overwritten by a second harness invocation.
+
+Check the runner itself without a node, MongoDB or root:
+
+```bash
+python3 tests/run_remaining_tests.py self-check
+```
+
+This self-check simulates orchestration failure/resume; it does not claim that any
+remaining real-data test has passed. Nothing is committed or pushed by the runner.
 
 ## Official sources
 

@@ -23,6 +23,30 @@ import envfile
 import xrpld_check
 
 
+@pytest.mark.parametrize("tail_exit,expected", [(124, 0), (4, 1), (0, 1), (137, 1)])
+def test_linux_trial_reports_early_tail_failure(tmp_path, tail_exit, expected):
+    if os.name == "nt" or not shutil.which("bash"):
+        pytest.skip("Linux trial requires Bash")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    function = source[source.index("step_trial() {"):source.index("finish() {")]
+    script = tmp_path / "trial.sh"
+    script.write_text('''set -euo pipefail
+REPO_DIR="$1"; TAIL_EXIT="$2"; TEST_DB=fixture; NODE_LEDGERS=100-400
+say() { :; }
+warn() { echo "$*" >&2; }
+ok() { echo "$*"; }
+wait_for_sync() { return 0; }
+xi() { return 0; }
+timeout() { return "$TAIL_EXIT"; }
+''' + function + '\nstep_trial\n', encoding="utf-8")
+    result = subprocess.run([shutil.which("bash"), str(script), str(tmp_path), str(tail_exit)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert ("live tail all worked" in result.stdout) == (expected == 0)
+    if expected:
+        assert f"exit {tail_exit}" in result.stderr
+
+
 @pytest.mark.parametrize("traffic", [False, True])
 def test_blocked_send_expires_and_drops_even_with_other_traffic(traffic):
     async def run():

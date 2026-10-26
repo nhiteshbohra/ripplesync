@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from xrpl_ingest import cli
-from xrpl_ingest.errors import ConnectFailed, IngestError, NetworkMismatch
+from xrpl_ingest.errors import ConnectFailed, IngestError, NetworkMismatch, RpcError, StopRequested
 
 
 @pytest.mark.parametrize("state,latest,ranges,ready", [
@@ -27,6 +27,9 @@ def test_ready_requires_synced_state_and_available_validated_ledger(
             return {"server_state": state, "validated_ledger": {"seq": latest},
                     "complete_ledgers": ranges}
 
+        async def get_ledger_hashes(self, index):
+            raise RpcError("lgrNotFound")
+
         async def close(self):
             closed.append(True)
 
@@ -37,6 +40,94 @@ def test_ready_requires_synced_state_and_available_validated_ledger(
         with pytest.raises(IngestError, match="Please wait a few minutes"):
             asyncio.run(cli._check_node_ready(cfg, lambda: False))
     assert closed == [True]
+
+
+@pytest.mark.parametrize("response,ready", [
+    ({"validated": True, "ledger": {"ledger_index": "100", "transactions": ["A"]}}, True),
+    ({"validated": False, "ledger": {"ledger_index": "100", "transactions": ["A"]}}, False),
+    ({"validated": True, "ledger": {"ledger_index": "99", "transactions": ["A"]}}, False),
+    ({"validated": True, "ledger": {"ledger_index": "100"}}, False),
+    ({"validated": True, "ledger": {"ledger_index": "100", "transactions": ["A", "A"]}}, False),
+    (RpcError("lgrNotFound"), False),
+    (RpcError("noPermission"), False),
+    (NetworkMismatch("wrong network"), False),
+    (StopRequested("stop"), False),
+])
+def test_native_tip_must_be_proven_available_when_disk_range_lags(monkeypatch, cfg, response, ready):
+    calls = []
+
+    class Node:
+        async def server_info(self):
+            return {"server_state": "full", "validated_ledger": {"seq": 100},
+                    "complete_ledgers": "1-99"}
+
+        async def get_ledger_hashes(self, index):
+            calls.append(index)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        async def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda *a, **kw: Node())
+    if ready:
+        asyncio.run(cli._check_node_ready(cfg, lambda: False))
+    else:
+        expected = type(response) if isinstance(response, Exception) else IngestError
+        if isinstance(response, RpcError) and response.error == "lgrNotFound":
+            expected = IngestError
+        with pytest.raises(expected):
+            asyncio.run(cli._check_node_ready(cfg, lambda: False))
+    assert calls == [100, "closed"]
+
+
+def test_stop_before_native_tip_probe(monkeypatch, cfg):
+    closed = []
+
+    class Node:
+        async def server_info(self):
+            return {"server_state": "full", "validated_ledger": {"seq": 100},
+                    "complete_ledgers": "1-99"}
+
+        async def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda *a, **kw: Node())
+    with pytest.raises(StopRequested):
+        asyncio.run(cli._check_node_ready(cfg, lambda: True))
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("state,ranges,ready", [
+    ("full", "1-100", True),
+    ("validating", "1-100", True),
+    ("connected", "1-100", False),
+    ("unknown", "1-100", False),
+    ("full", "empty", False),
+    ("full", "1-99", False),
+])
+def test_clio_checks_upstream_state_and_its_own_ledger_coverage(monkeypatch, cfg, state, ranges, ready):
+    calls = []
+
+    class Node:
+        async def server_info(self, **params):
+            calls.append(params)
+            if params:
+                return {"server_state": state, "complete_ledgers": "1-100"}
+            return {"clio_version": "2.8.0", "validated_ledger": {"seq": 100},
+                    "complete_ledgers": ranges}
+
+        async def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda *a, **kw: Node())
+    if ready:
+        asyncio.run(cli._check_node_ready(cfg, lambda: False))
+    else:
+        with pytest.raises(IngestError, match="Please wait a few minutes"):
+            asyncio.run(cli._check_node_ready(cfg, lambda: False))
+    assert calls == [{}, {"ledger_index": "current"}, "closed"]
 
 
 @pytest.mark.parametrize("args", [

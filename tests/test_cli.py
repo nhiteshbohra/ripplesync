@@ -329,6 +329,16 @@ def test_status_ok(cli_main, monkeypatch, capsys):
     assert "latest validated: 100" in out and "database: {" in out
 
 
+def test_status_reachable_node_without_validated_ledger(cli_main, monkeypatch, capsys):
+    monkeypatch.setattr(cli.WsSource, "from_config",
+                        lambda _cfg, **kw: FakeSource(latest=0, ranges="empty"))
+    assert cli_main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "latest validated: 0" in out and "database: {" in out
+    assert "waiting for a validated ledger; check node sync" in out
+    assert "unreachable" not in out
+
+
 def test_status_shows_range_file_progress(cli_main, monkeypatch, capsys, store, tmp_path):
     (tmp_path / "backfill_range.txt").write_text("start = 32570\nend = latest\n")
     store.mark_chunk_done(32570, 32579, 10, 0)  # cfg chunk_size = 10

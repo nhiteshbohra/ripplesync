@@ -15,8 +15,7 @@
 #
 # Exit codes: 0 done · 1 ledgers failed / stopped early · 2 config/args · 3 node lacks part
 # of the range · 4 node/Mongo unreachable · 5 another backfill holds the lock · 6 internal
-# error. 2, 3 and 5 are not restarted. Note: exit 1 IS restarted (Restart=on-failure), also
-# when a run finished with recorded failed ledgers or was stopped via process_status.txt.
+# error. 1, 2, 3 and 5 are not restarted, including recorded failures and a requested stop.
 
 [Unit]
 Description=XRPL ingest: historical backfill into MongoDB

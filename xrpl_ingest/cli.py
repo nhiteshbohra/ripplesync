@@ -23,7 +23,7 @@ from .backfill import discover_node, retry_failed, retry_policy, run_backfill
 from .config import Config
 from .config import FIRST_LEDGER
 from .support.monitor import DiskGuard, LowDiskSpace
-from .errors import ConfigError, IngestError, NetworkMismatch
+from .errors import ConfigError, IngestError, NetworkMismatch, RpcError, StopRequested
 from .ledger_ranges import parse_complete_ledgers
 from .support.runcontrol import InstanceLock, LockHeld, lock_path
 from .support.logsetup import setup_logging
@@ -262,9 +262,24 @@ async def _check_node_ready(cfg: Config, stop) -> None:
             raise IngestError(f"node returned malformed complete_ledgers: {e}") from None
         latest = info.get("validated_ledger", {}).get("seq", 0)
         state = info.get("server_state", "unknown")
-        if (state not in ("full", "proposing", "validating")
-                or not isinstance(latest, int) or isinstance(latest, bool) or latest <= 0
-                or not any(a <= latest <= b for a, b in ranges)):
+        if state == "unknown" and info.get("clio_version"):
+            # Clio omits server_state; current forwards to its connected xrpld.
+            state = (await source.server_info(ledger_index="current")).get("server_state", "unknown")
+        synced = (state in ("full", "proposing", "validating")
+                  and type(latest) is int and latest > 0)
+        available = synced and any(a <= latest <= b for a, b in ranges)
+        if synced and ranges and not available and not info.get("clio_version"):
+            # A native node may serve its validated tip before advertising it on disk.
+            from .repair import node_tx_hashes
+            if stop():
+                raise StopRequested("stopped before checking validated ledger availability")
+            try:
+                node_tx_hashes(latest, await source.get_ledger_hashes(latest))
+                available = True
+            except RpcError as e:
+                if e.error != "lgrNotFound":
+                    raise
+        if not available:
             raise IngestError(
                 f"XRPL node is not synced yet (state {state}, latest validated {latest}). "
                 "Please wait a few minutes for it to sync, then run this command again. "
@@ -438,7 +453,8 @@ def _range_status(cfg: Config, store: Any, latest: Optional[int]) -> int:
         return EXIT_CONFIG
     end = rng.end if rng.end is not None else latest
     if not end:
-        print(f"backfill range {rng.describe()}: end unknown (node unreachable)")
+        reason = "node unreachable" if end is None else "waiting for a validated ledger; check node sync"
+        print(f"backfill range {rng.describe()}: end unknown ({reason})")
         return 0
     if end < rng.start:
         print(f"backfill range {rng.describe()}: empty (end {end} < start {rng.start})")

@@ -4,7 +4,7 @@
 #
 # Two setups, both with your own xrpld node and the same program, settings and services:
 #   test    the server setup in small: a small node that keeps only recent ledgers (about 2 hours,
-#           ~1 GB), node_size small/medium. Shows that real data arrives: live tail, backfill,
+#           plus ledger state), node_size small/medium. Shows that real data arrives: live tail, backfill,
 #           verify, retries, services and speed, before you build the big server.
 #   server  full history: ~39 TB XFS disk, 64 GB RAM, node_size huge. Months to sync.
 #
@@ -169,10 +169,10 @@ report() {
   fi
   echo
   echo "Setups (both: your own node, MongoDB, this program, the same settings and services)"
-  echo "  test    The server setup in small. The node keeps only recent ledgers (~2 hours, ~1 GB),"
+  echo "  test    The server setup in small. The node keeps recent ledgers (~2 hours) plus ledger state,"
   echo "          node_size $(node_size_for test). After setup it waits for the node and checks that real data"
   echo "          arrives (tail, backfill, verify). Database: $TEST_DB."
-  echo "          Good: 16 GB RAM, 4 cores, 50 GB SSD (xrpl.org minimum for testing). 8 GB works, slower."
+  echo "          Good: 16 GB RAM, 4 cores, 50 GB SSD (xrpl.org minimum for testing). Less RAM may not catch up."
   echo "  server  Full history: 64 GB RAM, 8+ cores, ~39 TB NVMe with XFS, node_size huge. Months to"
   echo "          sync. Database: $SERVER_DB."
   echo "  Recommended for this computer: $(recommend)"
@@ -364,7 +364,7 @@ wait_for_sync() {
 
 # step_trial: the checks that show real data arrives, the same commands as on the server.
 step_trial() {
-  local last a b start end fails=0
+  local last a b start end tail_exit=0 fails=0
   say "Real-data checks (test setup)"
   if ! wait_for_sync; then
     warn "the node is not synced yet (state: ${NODE_LEDGERS:-?}). This is normal for a new node."
@@ -381,11 +381,15 @@ step_trial() {
   say "3/4 verify:          the same range"
   xi verify --start "$start" --end "$end" || fails=$((fails + 1))
   say "4/4 live tail:       60 seconds, then a graceful stop"
-  (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 timeout -s INT -k 30 60 .venv/bin/python -m xrpl_ingest tail) || true
+  (cd "$REPO_DIR" && XRPL_INGEST_HOME="$REPO_DIR" PYTHONUTF8=1 timeout -s INT -k 30 60 .venv/bin/python -m xrpl_ingest tail) || tail_exit=$?
+  if [ "$tail_exit" != 124 ]; then
+    warn "live tail trial did not complete normally (exit $tail_exit)"
+    fails=$((fails + 1))
+  fi
   xi health || fails=$((fails + 1))
   xi status || true
   if [ "$fails" = 0 ]; then ok "real data arrives: newest ledger, backfill, verify and live tail all worked (database $TEST_DB)"
-  else warn "$fails check(s) failed (see above). python -m xrpl_ingest doctor shows more."; fi
+  else warn "$fails check(s) failed (see above). python -m xrpl_ingest doctor shows more."; return 1; fi
 }
 
 finish() {

@@ -140,13 +140,18 @@ pick_python() {
 
 # make_venv: create $REPO_DIR/.venv with $PYTHON (pick_python first) and install requirements.txt.
 make_venv() {
-  local venv="$REPO_DIR/.venv" v wanted backup
+  local venv="$REPO_DIR/.venv" v wanted backup activated
   wanted="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
   if [ -e "$venv" ] || [ -L "$venv" ]; then
     v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
-    if [ "$v" != "$wanted" ]; then
+    activated="$venv"
+    if [ -f "$venv/bin/activate" ]; then
+      activated="$(. "$venv/bin/activate"; printf '%s' "${VIRTUAL_ENV:-}")"
+    fi
+    if [ "$v" != "$wanted" ] || ! [ "$activated" -ef "$venv" ]; then
       warn "Existing $venv uses Python $v; selected Python $wanted."
-      ask "Back up .venv and recreate it with Python $wanted?" Y || die "Existing .venv left unchanged; cannot continue with the wrong interpreter"
+      [ "$activated" -ef "$venv" ] || warn ".venv was copied or moved from $activated; its launchers need rebuilding."
+      ask "Back up .venv and recreate it with Python $wanted?" Y || die "Existing .venv left unchanged; cannot continue with an incompatible environment"
       backup="$(mktemp -d "$REPO_DIR/.venv-backup.XXXXXX")"
       mv "$venv" "$backup/.venv" || die "could not back up .venv to $backup"
       say "Previous .venv saved in $backup/.venv (move it back before using it)"

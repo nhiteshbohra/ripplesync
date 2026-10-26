@@ -51,6 +51,13 @@ def test_idempotent():
     assert once.count("port_ws_admin_local") == 2  # server line + stanza header
 
 
+@pytest.mark.parametrize("existing,expected", [("", ["0"]), ("[network_id]\n2\n", ["2"])])
+def test_mainnet_default_preserves_explicit_network(existing, expected):
+    out = edit_cfg.apply(SAMPLE + "\n" + existing, db_path="/d", history="pruned",
+                         node_size="medium", peers=[])
+    assert sections(out)["network_id"] == expected
+
+
 def test_new_ws_stanza_matches_example_cfg():
     s = sections(edit_cfg.apply(SAMPLE, db_path="/d", history="full", node_size="huge", peers=[]))
     assert s["port_ws_admin_local"] == [

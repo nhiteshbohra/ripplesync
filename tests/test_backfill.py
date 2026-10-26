@@ -389,7 +389,7 @@ class _Proc:
     def __init__(self, pid, exitcode):
         self.pid, self.exitcode, self.terminated = pid, exitcode, False
 
-    def terminate(self):
+    def kill(self):
         self.terminated = True
 
 
@@ -426,6 +426,17 @@ def test_dead_worker_and_terminate_helpers():
     assert backfill._dead_worker(pool) == (101, -9)
     backfill._terminate(pool)
     assert all(p.terminated for p in pool._processes.values()) and InstantPool.shutdowns[-1] is False
+
+
+def test_broken_pool_kills_workers_before_taking_shutdown_lock():
+    pool = SilentDeathPool(2, None)
+
+    def shutdown(**kwargs):
+        assert all(p.terminated for p in pool._processes.values())
+        assert kwargs == {"wait": False, "cancel_futures": True}
+
+    pool.shutdown = shutdown
+    backfill._terminate(pool)
 
 
 @pytest.mark.parametrize("content", ["current_process=0", "backfill=0", "BACKFILL = 0  # pause"])

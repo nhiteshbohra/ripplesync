@@ -1,6 +1,6 @@
 """Local synthetic-node benchmark; writes only to disposable MongoDB databases.
 
-Run: python setup/benchmark_ingest.py --ledgers 300 --transactions 20
+Run: python tests/benchmark_ingest.py --ledgers 300 --transactions 20
 Uses the project's existing fake node and verifies stored data after each timed run.
 This measures the pipeline on this machine, not full-history production throughput.
 """

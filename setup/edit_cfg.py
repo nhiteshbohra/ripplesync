@@ -92,6 +92,7 @@ def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[
         text = set_stanza(text, "ledger_history", ["full"])  # no online_delete: keep everything
     text = set_stanza(text, "node_db", node_db)
     text = set_stanza(text, "node_size", [node_size])
+    text = ensure_stanza(text, "network_id", ["0"])
     text = set_stanza(text, "rpc_startup", ['{ "command": "log_level", "severity": "warning" }'])
     text = ensure_stanza(text, "port_ws_admin_local", WS_ADMIN)
     text = add_line(text, "server", "port_ws_admin_local")

@@ -382,12 +382,14 @@ def _dead_worker(pool: ProcessPoolExecutor) -> Optional[Tuple[int, int]]:
 def _terminate(pool: ProcessPoolExecutor) -> None:
     """Hard stop: cancel queued chunks and kill the workers (private API, best effort)."""
     procs = list((getattr(pool, "_processes", None) or {}).values())
-    pool.shutdown(wait=False, cancel_futures=True)
     for proc in procs:
         try:
-            proc.terminate()
+            # Workers handle SIGTERM gracefully; a broken pool's manager joins them
+            # while holding the shutdown lock. Kill first so shutdown cannot deadlock.
+            proc.kill()
         except (OSError, AttributeError, ValueError):
             pass
+    pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _log_chunk(r: ChunkResult, t0: float, progress: Optional[ChunkProgress] = None) -> None:

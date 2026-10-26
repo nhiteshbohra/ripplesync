@@ -279,8 +279,8 @@ class WsSource:
     async def get_ledger(self, index: int) -> Dict[str, Any]:
         return await self.request("ledger", ledger_index=index, transactions=True, expand=True)
 
-    async def server_info(self) -> Dict[str, Any]:
-        return _server_info(await self.request("server_info"))
+    async def server_info(self, **params: Any) -> Dict[str, Any]:
+        return _server_info(await self.request("server_info", **params))
 
     async def latest_validated(self) -> int:
         seq = (await self.server_info()).get("validated_ledger", {}).get("seq")
