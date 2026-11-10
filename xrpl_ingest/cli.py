@@ -28,6 +28,7 @@ from .ledger_ranges import parse_complete_ledgers
 from .support.runcontrol import InstanceLock, LockHeld, lock_path
 from .support.logsetup import setup_logging
 from .source import WsSource
+from .recovery import recover_jobs
 from .support.runcontrol import StopFlag, any_of, install_stop_signal, stop_requested
 from .store import MongoStore
 from .tail import tail
@@ -61,7 +62,7 @@ exit codes:
 
 STOP_HELP = """\
 graceful stop: a line `current_process=0` (all commands) or `<command>=0` (tail, backfill,
-retry-failed) in the stop file (PROCESS_STATUS_FILE); any line that applies and says 0
+retry-failed, recover-gaps, reconcile) in the stop file (PROCESS_STATUS_FILE); any line that applies and says 0
 stops. Or SIGTERM, SIGBREAK (Windows Ctrl+Break), or the first Ctrl+C (second = abort)."""
 
 
@@ -92,6 +93,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = add("retry-failed", "re-fetch ledgers in the failed collection")
     r.add_argument("--max-rounds", type=lambda value: positive_int(value, "--max-rounds"), default=5)
+
+    recovery = add("recover-gaps", "automatically ingest and verify persisted historical gaps")
+    recovery.add_argument("--once", action="store_true",
+                          help="process at most one due recovery job, then exit")
+    recovery.add_argument("--poll-interval", type=lambda value: positive_int(
+        value, "--poll-interval"), default=30, metavar="SECONDS",
+        help="seconds between checks when no recovery job is due (default %(default)s)")
+
+    reconcile = add("reconcile", "continuously compare stored ledgers with the source")
+    reconcile.add_argument("--start", type=int, required=True)
+    reconcile.add_argument("--end", type=int, required=True)
+    reconcile.add_argument("--interval", type=lambda value: positive_int(
+        value, "--interval"), default=300, metavar="SECONDS",
+        help="seconds between deep reconciliation passes (default %(default)s)")
+    reconcile.add_argument("--once", action="store_true",
+                           help="run one pass and exit")
 
     v = add("verify", "find missing ledgers and tx-count mismatches in a range")
     v.add_argument("--start", type=int, required=True)
@@ -186,6 +203,58 @@ def _cmd_retry_failed(run: Run) -> int:
     return EXIT_FAILED if remaining or guard.tripped else EXIT_OK
 
 
+def _cmd_recover_gaps(run: Run) -> int:
+    store = run.store()
+    guard = _disk_guard(run, store)
+    store.ensure_indexes()
+    source = WsSource.from_config(run.cfg, stop_check=run.stop)
+
+    async def recover() -> int:
+        try:
+            return await recover_jobs(
+                source, store, retry_policy(run.cfg), chunk_size=run.cfg.chunk_size,
+                stop_check=run.stop, poll_interval=run.args.poll_interval,
+                once=run.args.once)
+        finally:
+            await source.close()
+
+    asyncio.run(recover())
+    return EXIT_FAILED if run.stop() or guard.tripped else EXIT_OK
+
+
+def _cmd_reconcile(run: Run) -> int:
+    if run.args.start < FIRST_LEDGER or run.args.end < run.args.start:
+        raise ValueError(f"reconcile range must satisfy {FIRST_LEDGER} <= start <= end")
+    store = run.store()
+    guard = _disk_guard(run, store)
+    source = WsSource.from_config(run.cfg, stop_check=run.stop)
+    last_remaining = 0
+
+    async def reconcile() -> None:
+        nonlocal last_remaining
+        try:
+            while not run.stop():
+                ranges, _ = await discover_node(source)
+                from .repair import repair_range
+                summary = await repair_range(
+                    source, store, run.args.start, run.args.end, ranges,
+                    retry=retry_policy(run.cfg), concurrency=run.cfg.concurrency,
+                    stop_check=run.stop, emit=print, repair=False, deep=True)
+                last_remaining = summary.remaining
+                if run.args.once or run.stop():
+                    break
+                for _ in range(run.args.interval):
+                    if run.stop():
+                        break
+                    await asyncio.sleep(1)
+        finally:
+            await source.close()
+
+    store.ensure_indexes()
+    asyncio.run(reconcile())
+    return EXIT_FAILED if last_remaining or run.stop() or guard.tripped else EXIT_OK
+
+
 def _cmd_data(run: Run) -> int:
     """verify (incl. --repair/--deep), fetch, tx: see DATA_COMMANDS at the end."""
     return DATA_COMMANDS[run.command](run.cfg, run.store(), run.args, run.stop)
@@ -217,6 +286,8 @@ COMMANDS: Dict[str, Command] = {
     "backfill": Command(_cmd_backfill, ingest=True),
     "tail": Command(_cmd_tail, ingest=True),
     "retry-failed": Command(_cmd_retry_failed, ingest=True),
+    "recover-gaps": Command(_cmd_recover_gaps, ingest=True),
+    "reconcile": Command(_cmd_reconcile, ingest=True),
     "verify": Command(_cmd_data),
     "fetch": Command(_cmd_data),
     "tx": Command(_cmd_data),
@@ -419,11 +490,28 @@ def _verify(store: MongoStore, start: int, end: int) -> int:
         for g in store.find_gaps(a, b):
             print(f"missing ledgers {g[0]}-{g[1]}")
             bad += 1
-        for n, exp, got in store.tx_count_mismatches(a, b):
+        count_mismatches = store.tx_count_mismatches(a, b)
+        for n, exp, got in count_mismatches:
             print(f"ledger {n}: expected {exp} transactions, stored {got}")
             bad += 1
+        tx_count_bad = {item[0] for item in count_mismatches}
+        for n, expected, actual_txs, actual_metas in store.bundle_mismatches(a, b):
+            if n not in tx_count_bad:
+                print(f"ledger {n}: incomplete transaction/metadata bundle "
+                      f"(expected {expected}, stored {actual_txs} transactions and "
+                      f"{actual_metas} metadata documents; child hashes may differ)")
+                bad += 1
     print("OK" if not bad else f"{bad} problem(s)")
     return 1 if bad else 0
+
+
+def _print_ledger_progress(store: MongoStore, start: int, end: int) -> None:
+    progress = store.ledger_progress(start, end)
+    print(
+        "ledger progress: "
+        f"attempted {progress['attempted']} (contiguous {progress['attempted_contiguous']}), "
+        f"ingested {progress['ingested']} (contiguous {progress['ingested_contiguous']}), "
+        f"verified {progress['verified']} (contiguous {progress['verified_contiguous']})")
 
 
 async def _status(cfg: Config, store: MongoStore, stop=lambda: False) -> int:
@@ -474,7 +562,7 @@ def add_data_parsers(sub, verify: argparse.ArgumentParser) -> None:
                              "1 if problems remain, 4 node unreachable")
     verify.add_argument("--deep", action="store_true",
                         help="also check parent_hash links (offline) and compare stored tx "
-                             "hashes with the node's ledger hash lists")
+                             "hashes, ledger fields, and full metadata with the node")
 
     f = sub.add_parser("fetch", help="fetch and store one ledger now (no chunk progress)",
                        epilog="exit codes: 0 stored; 1 failed (recorded in the failed "
@@ -590,10 +678,12 @@ async def _verify_with_node(cfg: Config, store: MongoStore, start: int, end: int
     line = f"verify: bad ledgers {s.found}"
     if deep:
         line += (f", chain breaks {s.chain_breaks}, hash mismatches {s.hash_mismatches}, "
-                 f"not compared {s.unchecked}")
+                 f"ledger hash mismatches {s.ledger_hash_mismatches}, "
+                 f"metadata mismatches {s.metadata_mismatches}, not compared {s.unchecked}")
     if repair:
         line += (f"; repaired {s.repaired}, failed {s.failed}, node lacks {s.node_lacks}")
     print(line + f"; remaining {s.remaining}")
+    _print_ledger_progress(store, start, end)
     if s.stopped:
         print("stopped early: the rest of the range was not verified")
     elif s.remaining:

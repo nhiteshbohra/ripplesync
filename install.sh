@@ -196,6 +196,15 @@ step_mongodb() {
     return 0
   fi
   if [ "$WSL" = yes ]; then wsl_mongo_notes; return 0; fi
+  if [ "${ID:-}" = debian ]; then
+    if [ -n "${MONGO_URI:-}" ] || [ -n "${MONGO_URI_FILE:-}" ] ||
+       python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --has MONGO_URI ||
+       python3 "$REPO_DIR/setup/envfile.py" "$REPO_DIR/.env" --has MONGO_URI_FILE; then
+      warn "Debian does not have a supported MongoDB 8.0 apt setup in this installer; using the configured external MongoDB"
+      return 0
+    fi
+    die "automatic MongoDB installation is Ubuntu-only. On Debian, configure MONGO_URI/MONGO_URI_FILE for an existing MongoDB before installing."
+  fi
   if [ -n "${MONGO_URI:-}" ] && [ "${MONGO_URI#"$LOCAL_MONGO"}" = "$MONGO_URI" ] && [ "${MONGO_URI#mongodb://localhost}" = "$MONGO_URI" ]; then
     ok "using the MongoDB from MONGO_URI (not installing a local one)"; return 0
   fi
@@ -211,7 +220,6 @@ step_node() {
   if [ "$mode" = server ]; then history=full; else history=pruned; fi
   size="$(node_size_for "$mode")"
   say "xrpld node: $( [ "$mode" = server ] && echo 'full history' || echo 'recent ledgers only') (history=$history), node_size=$size, database in $DB_PATH"
-  check_platform
   if [ "$mode" = server ]; then
     [ "$RAM_GB" -ge 60 ] || need_ok "full history wants 64 GB RAM; this computer has ${RAM_GB} GB. Use --mode test on this computer"
   else
@@ -219,7 +227,10 @@ step_node() {
     [ "$RAM_GB" -ge 15 ] || warn "${RAM_GB} GB RAM: below the xrpl.org test minimum of 16 GB; node_size $size, the node may sync slowly or fall behind"
     [ "$CORES" -ge 4 ] || warn "$CORES CPU cores: xrpl.org asks for 4+; the node may fall behind"
   fi
+
   check_db_path
+  IFS=';' read -ra parts <<<"${FIXED_PEERS:-}"
+  for p in "${parts[@]:-}"; do [ -n "$p" ] && peers+=(--peer "$p"); done
   local probe="$DB_PATH" fs free_gb
   while [ ! -e "$probe" ]; do probe="$(dirname "$probe")"; done
   fs=$(stat -f -c %T "$probe"); free_gb=$(df -BG --output=avail "$probe" | tail -1 | tr -dc 0-9)
@@ -243,25 +254,20 @@ step_node() {
     die "the $mode setup needs xrpld"
   fi
 
+  $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$CFG" --db-path "$DB_PATH" --history "$history" \
+    --node-size "$size" --check "${peers[@]}"
+  if ! $SUDO python3 "$REPO_DIR/setup/xrpld_check.py" check --cfg "$CFG"; then
+    die "XRPL validator configuration needs review. No automatic repair was made. After reviewing it, run: sudo python3 \"$REPO_DIR/setup/xrpld_check.py\" fix --cfg \"$CFG\" --overwrite-existing; then rerun the installer."
+  fi
   [ "$SYSTEMD" = no ] || $SUDO systemctl stop xrpld.service 2>/dev/null || true
   $SUDO mkdir -p "$DB_PATH"
   if id xrpld >/dev/null 2>&1; then check_db_owner; $SUDO chown -R xrpld:xrpld "$DB_PATH"
   else warn "no 'xrpld' user found; make $DB_PATH writable for the user that runs xrpld"; fi
 
   say "Configuring $CFG (a backup is kept next to it)"
-  IFS=';' read -ra parts <<<"${FIXED_PEERS:-}"
-  for p in "${parts[@]:-}"; do [ -n "$p" ] && peers+=(--peer "$p"); done
   $SUDO python3 "$REPO_DIR/setup/edit_cfg.py" "$CFG" --db-path "$DB_PATH" --history "$history" \
     --node-size "$size" "${peers[@]}"
   remove_old_cfg_links
-
-  if ! $SUDO python3 "$REPO_DIR/setup/xrpld_check.py" check --cfg "$CFG"; then
-    if ask "The node's validator settings are wrong (see above); xrpld stops at start with them. Restore the official ones (backups are kept)?" Y; then
-      $SUDO python3 "$REPO_DIR/setup/xrpld_check.py" fix --cfg "$CFG"
-    else
-      warn "validator settings left as they are"
-    fi
-  fi
 
   if ! start_xrpld; then
     die "xrpld does not start; the lines above show why. Fix it, then run this script again (it is safe to repeat)."
@@ -433,6 +439,7 @@ detect
 
 if [ "$CHECK_ONLY" = 1 ]; then
   report
+  check_platform
   pick_python
   echo "(--check: nothing was changed)"
   exit 0
@@ -446,6 +453,7 @@ if [ "$TRIAL_ONLY" = 1 ]; then
 fi
 
 report
+check_platform
 [ "$APT" = yes ] || die "this installer needs apt (Ubuntu / Debian). On other Linux systems follow README.md 'Manual setup'"
 
 if [ -z "$MODE" ]; then
@@ -480,6 +488,6 @@ step_env "$MODE"
 step_tests
 step_doctor
 UNITS=0
-install_ingest_units "${SUDO_USER:-$(id -un)}" && UNITS=1 || true
+install_ingest_units "${XRPL_INGEST_SERVICE_USER:-${SUDO_USER:-$(id -un)}}" && UNITS=1 || true
 [ "$MODE" = server ] || step_trial
 finish "$MODE" "$UNITS"

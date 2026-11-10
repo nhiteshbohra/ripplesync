@@ -144,6 +144,32 @@ def deep(source, store, start, end, repair=False, node_ranges=((1, 100),), stop=
     return s, lines
 
 
+def test_deep_ledger_comparison_ignores_server_response_warnings(store):
+    save(store, 1)
+    store.ledgers.update_one(
+        {"block_number": 1},
+        {"$set": {"warnings": [{"message": "server-specific"}],
+                  "node_warnings": [{"message": "transport-specific"}]}},
+    )
+
+    summary, _ = deep(FakeSource(), store, 1, 1)
+
+    assert summary.ok
+
+
+def test_deep_metadata_comparison_ignores_endpoint_derived_fields(store):
+    save(store, 1)
+    store.metas.update_one(
+        {"transaction_hash": "H1_0"},
+        {"$set": {"meta.offer_id": "OFFER", "meta.nftoken_id": "TOKEN",
+                  "meta.nftoken_ids": ["TOKEN"]}},
+    )
+
+    summary, _ = deep(FakeSource(), store, 1, 1)
+
+    assert summary.ok
+
+
 def test_find_chain_breaks():
     links = [(1, "A", "Z"), (2, "B", "A"), (3, "C", "X"), (5, "E", "D"), (6, "F", "E")]
     assert find_chain_breaks(links, 1) == [ChainBreak(3, "X", "B")]  # 1: no N-1; 5: 4 absent
@@ -213,8 +239,18 @@ def test_deep_repair_reingests_hash_mismatch_ledger(store):
     store.ledgers.update_one({"block_number": 2}, {"$set": {"num_transactions": 1}})  # hide it
     src = FakeSource()
     s, lines = deep(src, store, 1, 3, repair=True)
-    assert src.calls == [2] and s.repaired == 1 and s.remaining == 0 and s.ok
+    assert sorted(src.calls) == [1, 2, 2, 2, 3]
+    assert s.repaired == 1 and s.remaining == 0 and s.ok
     assert store.tx_hashes(2) == {"H2_0", "H2_1"}
+
+
+def test_deep_repair_detects_and_repairs_source_metadata_mismatch(store):
+    save(store, 1)
+    store.metas.update_one({"transaction_hash": "H1_0"}, {"$set": {"meta.TransactionResult": "tefFAIL"}})
+    summary, lines = deep(FakeSource(), store, 1, 1, repair=True)
+    assert summary.repaired == 1 and summary.remaining == 0 and summary.ok
+    assert store.metas.find_one({"transaction_hash": "H1_0"})["meta"]["TransactionResult"] == "tesSUCCESS"
+    assert any("metadata contents differ from source" in line for line in lines)
 
 
 def test_plain_repair_does_not_see_hash_mismatches(store):
@@ -230,9 +266,10 @@ def test_deep_repair_never_deletes_extra_tx_docs(store):
     save(store, *range(1, 4))
     store.txs.update_one({"hash": "H2_0"}, {"$set": {"hash": "BOGUS"}})
     s, lines = deep(FakeSource(), store, 1, 3, repair=True)
-    assert s.repaired == 1 and s.remaining == 1 and not s.ok  # the extra one is only reported
+    assert s.repaired == 0 and s.failed == 1 and s.remaining == 1 and not s.ok
+    # The bundle commit guard refuses to replace a ledger while an extra child document remains.
     assert "BOGUS" in store.tx_hashes(2)
-    assert lines[-1].endswith("1 extra: BOGUS (after repair)")
+    assert any("MongoDB read-back incomplete" in line for line in lines)
 
 
 def test_deep_node_error_counts_as_not_compared(store):
@@ -242,6 +279,15 @@ def test_deep_node_error_counts_as_not_compared(store):
     s, lines = deep(src, store, 1, 3)
     assert s.unchecked == 1 and s.remaining == 1 and not s.ok
     assert "ledger 2: could not compare with node: RpcError: lgrNotFound" in lines
+
+
+def test_source_unavailability_does_not_mark_ledger_verified(store):
+    save(store, 10)
+    summary, lines = deep(FakeSource(ranges="1-9"), store, 10, 10,
+                           node_ranges=((1, 9),))
+    assert summary.unchecked == 1 and summary.remaining == 1 and not summary.ok
+    assert store.ledger_progress(10, 10)["verified_contiguous"] == 0
+    assert any("complete_ledgers does not include" in line for line in lines)
 
 
 def test_post_repair_non_hash_problem_is_identified(store, monkeypatch):
@@ -269,12 +315,13 @@ def test_deep_transient_node_error_is_retried(store):
     assert s.ok and s.unchecked == 0
 
 
-def test_deep_skips_comparison_for_ledgers_the_node_lacks(store):
+def test_deep_marks_ledgers_unverified_when_the_node_lacks_them(store):
     save(store, *range(1, 4))
     src = FakeSource()
     src.hash_script = {3: [RpcError("lgrNotFound")]}  # would fail if asked
     s, _ = deep(src, store, 1, 3, node_ranges=[(1, 2)])
-    assert s.ok
+    assert not s.ok and s.unchecked == 1 and s.remaining == 1
+    assert len(src.hash_script[3]) == 1
 
 
 def test_deep_stop_during_comparison(store):

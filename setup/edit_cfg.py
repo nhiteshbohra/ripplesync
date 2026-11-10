@@ -3,7 +3,7 @@
 
 usage: edit_cfg.py CFG --db-path PATH [--history full|pruned]
                        [--node-size tiny|small|medium|large|huge]
-                       [--peer "host port"]...
+                       [--peer "host port"]... [--overwrite-existing]
 """
 from __future__ import annotations
 
@@ -83,18 +83,101 @@ def add_line(text: str, name: str, line: str) -> str:
     return _join(pre, sections)
 
 
-def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[str]) -> str:
+def _effective_lines(body: List[str]) -> List[str]:
+    return [line.split("#", 1)[0].strip() for line in body
+            if line.split("#", 1)[0].strip()]
+
+
+def _named_sections(text: str, name: str) -> List[List[str]]:
+    return [body for section_name, body in _split(text)[1] if section_name == name]
+
+
+def _ensure_unique_stanza(text: str, name: str, body: List[str]) -> str:
+    matches = _named_sections(text, name)
+    if len(matches) > 1:
+        raise ValueError(f"multiple [{name}] stanzas exist; they were not changed")
+    if not matches:
+        return set_stanza(text, name, body)
+    return text
+
+
+def _validate_local_ws_stanza(text: str) -> None:
+    matches = _named_sections(text, "port_ws_admin_local")
+    if not matches:
+        return
+    if len(matches) > 1:
+        raise ValueError("multiple [port_ws_admin_local] stanzas exist; they were not changed")
+    values = {}
+    for line in matches[0]:
+        key, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    loopback = {"127.0.0.1", "::1"}
+    if values.get("ip") not in loopback:
+        raise ValueError(
+            "existing [port_ws_admin_local] must bind to loopback (127.0.0.1 or ::1); "
+            "it was not changed. Restrict it manually before continuing."
+        )
+    admins = [item.strip() for item in values.get("admin", "").split(",")]
+    if not admins or any(item not in loopback for item in admins):
+        raise ValueError(
+            "existing [port_ws_admin_local] admin addresses must be loopback-only; "
+            "it was not changed. Restrict it manually before continuing."
+        )
+    protocols = {item.strip() for item in values.get("protocol", "").split(",")}
+    if not protocols.intersection({"ws", "wss"}):
+        raise ValueError(
+            "existing [port_ws_admin_local] must enable ws or wss; it was not changed"
+        )
+
+
+def _set_managed_stanza(text: str, name: str, body: List[str], *,
+                        overwrite_existing: bool) -> str:
+    matches = _named_sections(text, name)
+    if len(matches) > 1:
+        if not overwrite_existing:
+            raise ValueError(f"multiple [{name}] stanzas exist; they were not changed")
+        text = remove_stanza(text, name)
+        return set_stanza(text, name, body)
+    if not matches:
+        return set_stanza(text, name, body)
+    current = matches[0]
+    if _effective_lines(current) == _effective_lines(body):
+        return text
+    if not overwrite_existing:
+        raise ValueError(
+            f"existing [{name}] differs from the installer settings; it was not changed. "
+            "Review the stanza and rerun with --overwrite-existing only if replacement is intended."
+        )
+    return set_stanza(text, name, body)
+
+
+def apply(text: str, *, db_path: str, history: str, node_size: str, peers: List[str],
+          overwrite_existing: bool = False) -> str:
     node_db = ["type=NuDB", f"path={db_path}"]
     if history == "pruned":
         node_db += ["online_delete=2000", "advisory_delete=0"]  # keeps ~2000 ledgers only
-        text = remove_stanza(text, "ledger_history")
     else:
-        text = set_stanza(text, "ledger_history", ["full"])  # no online_delete: keep everything
-    text = set_stanza(text, "node_db", node_db)
-    text = set_stanza(text, "node_size", [node_size])
-    text = ensure_stanza(text, "network_id", ["0"])
-    text = set_stanza(text, "rpc_startup", ['{ "command": "log_level", "severity": "warning" }'])
-    text = ensure_stanza(text, "port_ws_admin_local", WS_ADMIN)
+        text = _set_managed_stanza(text, "ledger_history", ["full"],
+                                   overwrite_existing=overwrite_existing)
+    if history == "pruned" and "ledger_history" in dict(_split(text)[1]):
+        if not overwrite_existing:
+            raise ValueError(
+                "existing [ledger_history] conflicts with pruned mode; it was not changed. "
+                "Review the stanza and rerun with --overwrite-existing only if removal is intended."
+            )
+        text = remove_stanza(text, "ledger_history")
+    text = _set_managed_stanza(text, "node_db", node_db,
+                               overwrite_existing=overwrite_existing)
+    text = _set_managed_stanza(text, "node_size", [node_size],
+                               overwrite_existing=overwrite_existing)
+    text = _ensure_unique_stanza(text, "network_id", ["0"])
+    text = _set_managed_stanza(
+        text, "rpc_startup", ['{ "command": "log_level", "severity": "warning" }'],
+        overwrite_existing=overwrite_existing,
+    )
+    _validate_local_ws_stanza(text)
+    text = _ensure_unique_stanza(text, "port_ws_admin_local", WS_ADMIN)
     text = add_line(text, "server", "port_ws_admin_local")
     for p in peers:
         text = add_line(text, "ips_fixed", p)
@@ -183,9 +266,13 @@ def main(argv=None) -> int:
     ap.add_argument("cfg")
     ap.add_argument("--db-path")
     ap.add_argument("--ws-url", action="store_true", help="only print the configured WebSocket URL")
+    ap.add_argument("--check", action="store_true",
+                    help="validate that existing managed stanzas are compatible without writing")
     ap.add_argument("--history", choices=("full", "pruned"), default="full")
     ap.add_argument("--node-size", choices=NODE_SIZES, default="huge")
     ap.add_argument("--peer", action="append", default=[])
+    ap.add_argument("--overwrite-existing", action="store_true",
+                    help="replace conflicting installer-managed stanzas after reviewing them")
     a = ap.parse_args(argv)
 
     if not a.ws_url and a.db_path is None:
@@ -202,10 +289,18 @@ def main(argv=None) -> int:
         except ValueError as exc:
             ap.error(str(exc))
         return 0
+    try:
+        new = apply(text, db_path=a.db_path, history=a.history, node_size=a.node_size,
+                    peers=a.peer, overwrite_existing=a.overwrite_existing)
+    except ValueError as exc:
+        print(f"edit_cfg: {exc}", file=sys.stderr)
+        return 1
+    if a.check:
+        print(f"{a.cfg}: existing managed stanzas are compatible; no changes made")
+        return 0
     saved = backup(a.cfg)
     if saved:
         print(f"backup: {saved}")
-    new = apply(text, db_path=a.db_path, history=a.history, node_size=a.node_size, peers=a.peer)
     os.makedirs(os.path.dirname(os.path.abspath(a.cfg)), exist_ok=True)
     write_atomic(a.cfg, new)
     print(f"updated {a.cfg} (history={a.history}, node_size={a.node_size}, db={a.db_path})")

@@ -5,7 +5,7 @@ from pymongo.errors import AutoReconnect
 
 from conftest import FAST_RETRY, NOW, FakeSource, make_result, no_sleep
 from xrpl_ingest.support import runcontrol as stopflag
-from xrpl_ingest.backfill import run_backfill
+from xrpl_ingest.backfill import process_chunk, run_backfill
 from xrpl_ingest.errors import ConnectFailed, RpcError, StopRequested
 from xrpl_ingest.fetcher import RetryPolicy
 from xrpl_ingest.store import LAST_LEDGER_ID
@@ -59,6 +59,27 @@ def test_backfill_then_tail_handoff_leaves_no_gap(cfg, store):
     assert run_tail(src, store, iterations=1) == hi + 5
     assert src.calls == list(range(hi + 1, hi + 6))
     assert store.find_gaps(lo, hi + 5) == []
+
+
+def test_backfill_and_live_tail_can_ingest_concurrently(store):
+    source = FakeSource(latest=103, ranges="100-103")
+
+    async def run_together():
+        historical = asyncio.create_task(process_chunk(
+            source, store, (100, 102), concurrency=2, retry=FAST_RETRY,
+            stop_check=lambda: False, sleep=no_sleep))
+        live = asyncio.create_task(tail(
+            source, store, FAST_RETRY, poll_interval=0, stop_check=lambda: False,
+            sleep=no_sleep, max_iterations=1))
+        return await asyncio.gather(historical, live)
+
+    result, checkpoint = asyncio.run(run_together())
+    assert result.ok == 3 and result.failed == 0 and result.completed
+    assert checkpoint == store.get_checkpoint() == 103
+    assert store.find_gaps(100, 103) == []
+    assert store.bundle_mismatches(100, 103) == []
+    assert store.txs.count_documents({"block_number": {"$gte": 100, "$lte": 103}}) == 8
+    assert store.metas.count_documents({"block_number": {"$gte": 100, "$lte": 103}}) == 8
 
 
 def stop_after_fetches(src, n):

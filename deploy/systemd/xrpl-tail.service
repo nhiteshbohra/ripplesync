@@ -1,5 +1,5 @@
 # xrpl-tail.service -- live follow of new validated ledgers into MongoDB.
-# TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST (source-level tests only).
 #
 # Installed by install.sh (node / server setup), which replaces the
 # placeholders @REPO_DIR@ (absolute repo path) and @USER@ (the non-root user that owns the
@@ -20,15 +20,34 @@
 Description=XRPL ingest: live tail into MongoDB
 Wants=network-online.target
 After=network-online.target mongod.service xrpld.service
+StartLimitIntervalSec=1min
+StartLimitBurst=5
 
 [Service]
 User=@USER@
 WorkingDirectory=@REPO_DIR@
 Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStartPre="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest doctor --mongo --node
 ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest tail
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 RestartPreventExitStatus=2 3 5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # SIGTERM = graceful stop (in-flight work finishes); SIGKILL after TimeoutStopSec.
 TimeoutStopSec=300
 KillMode=control-group

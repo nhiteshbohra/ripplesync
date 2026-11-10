@@ -1,5 +1,5 @@
 # xrpl-backfill.service -- historical backfill (multi-process) into MongoDB.
-# TEMPLATE, NOT TESTED ON A REAL HOST (only reviewed against the systemd man pages).
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST (source-level tests only).
 #
 # Installed (NOT enabled) by install.sh (node / server setup), which replaces
 # the placeholders @REPO_DIR@ and @USER@ and writes /etc/systemd/system/xrpl-backfill.service.
@@ -21,19 +21,38 @@
 Description=XRPL ingest: historical backfill into MongoDB
 Wants=network-online.target
 After=network-online.target mongod.service xrpld.service
+StartLimitIntervalSec=1min
+StartLimitBurst=5
 
 [Service]
 User=@USER@
 WorkingDirectory=@REPO_DIR@
 Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStartPre="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest doctor --mongo --node
 ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest backfill
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 # 1 = finished with failed ledgers or stopped on request (stop file / systemctl stop): restarting
 # would just loop. Use retry-failed / start again by hand. Crashes (4, 6, signals) still restart.
 RestartPreventExitStatus=1 2 3 5
 # SIGTERM = graceful stop; SIGKILL after TimeoutStopSec. control-group sends SIGTERM to the
 # pool workers too, not only to the main process.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 TimeoutStopSec=300
 KillMode=control-group
 

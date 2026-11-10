@@ -59,13 +59,27 @@ def test_missing_validators_file_and_stanza(tmp_path):
 
 def test_fix_backs_up_and_restores_official_setup(tmp_path):
     cfg = write(tmp_path, BROKEN_CFG, "[validator_list_keys]\nbad\n")
-    code, msgs = xrpld_check.run("fix", cfg)
+    code, msgs = xrpld_check.run("fix", cfg, overwrite_existing=True)
     assert code == 0
     assert len(list(tmp_path.glob("xrpld.cfg.bak.*"))) == 1 and len(list(tmp_path.glob("validators.txt.bak.*"))) == 1
     fixed = (tmp_path / "xrpld.cfg").read_text(encoding="utf-8")
     assert "validator_list_keys" not in fixed and "path=/var/lib/xrpld/db/nudb" in fixed
     assert (tmp_path / "validators.txt").read_text(encoding="utf-8") == xrpld_check.OFFICIAL_VALIDATORS_TXT
     assert xrpld_check.run("check", cfg) == (0, [])
+
+
+def test_fix_refuses_to_replace_existing_validator_configuration_by_default(tmp_path):
+    cfg = write(tmp_path, BROKEN_CFG, "[validator_list_keys]\ncustom-key\n")
+    cfg_before = (tmp_path / "xrpld.cfg").read_text(encoding="utf-8")
+    validators_before = (tmp_path / "validators.txt").read_text(encoding="utf-8")
+
+    code, messages = xrpld_check.run("fix", cfg)
+
+    assert code == 1
+    assert "--overwrite-existing" in messages[0]
+    assert (tmp_path / "xrpld.cfg").read_text(encoding="utf-8") == cfg_before
+    assert (tmp_path / "validators.txt").read_text(encoding="utf-8") == validators_before
+    assert not list(tmp_path.glob("*.bak.*"))
 
 
 def test_fix_on_good_setup_changes_nothing(tmp_path):

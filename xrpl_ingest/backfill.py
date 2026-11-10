@@ -77,6 +77,7 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
                 res.completed = False
                 return
             try:
+                await asyncio.to_thread(store.record_ledger_attempt, idx)
                 bundle = await prepare_ledger(source, idx, retry, sleep=sleep, timings=res.timings,
                                               executor=transforms)
             except Exception as e:
@@ -141,7 +142,7 @@ async def process_chunk(source: Any, store: Any, chunk: Range, *, concurrency: i
     if res.unrecorded:
         log.error("chunk %d-%d: %d failed ledgers could not be recorded; chunk left unmarked so "
                   "the next backfill redoes it", chunk[0], chunk[1], res.unrecorded)
-    elif res.completed:
+    elif res.completed and not res.failed:
         try:
             await asyncio.to_thread(store.mark_chunk_done, chunk[0], chunk[1], res.ok, res.failed)
         except PyMongoError as e:
@@ -243,6 +244,9 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
         chunks, unavailable = plan_chunks(start, end, node_ranges, cfg.chunk_size, done)
         for a, b in unavailable:
             log.warning("node does not have ledgers %d-%d (skipped; check complete_ledgers)", a, b)
+            store.schedule_recovery_range(
+                a, b, "source complete_ledgers does not include this range",
+                blocked=True, retry_after_seconds=300)
         log.info("backfill %d-%d: %d chunks to run (%d already done)", start, end, len(chunks), len(done))
         progress = ChunkProgress(len(done), chunks)
 
@@ -271,6 +275,19 @@ def run_backfill(cfg: Config, start: int, end: Optional[int] = None, *,
             "seconds": round(time.time() - t0, 1),
             "low_disk": disk.tripped,
         }
+        for index, reason in store.list_failed_with_reasons():
+            if start <= index <= end:
+                available = any(a <= index <= b for a, b in node_ranges)
+                store.schedule_recovery_range(
+                    index, index, reason or "ledger ingestion failed",
+                    blocked=not available, retry_after_seconds=60)
+        completed_chunks = {result.chunk for result in results if result.completed}
+        if lost or len(completed_chunks) != len(chunks):
+            for a, b in chunks:
+                if (a, b) not in completed_chunks:
+                    store.schedule_recovery_range(
+                        a, b, "backfill worker did not complete this range",
+                        retry_after_seconds=60)
         log.info("backfill summary: %s", summary)
         return summary
     finally:

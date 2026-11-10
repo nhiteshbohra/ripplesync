@@ -56,6 +56,7 @@ def test_save_is_idempotent_and_replaces(store):
 def test_save_empty_ledger(store):
     store.save_ledger_bundle(*bundle(1, 0))
     assert store.ledgers.count_documents({}) == 1 and store.txs.count_documents({}) == 0
+    assert store.ledger_progress(1, 1)["ingested_contiguous"] == 1
 
 
 def test_checkpoint_roundtrip(store):
@@ -106,10 +107,11 @@ def test_checkpoint_never_moves_back(store):
 
 def test_chunk_progress(store):
     store.mark_chunk_done(10, 19, ok=10, failed=0)
-    store.mark_chunk_done(20, 29, ok=9, failed=1)
+    with pytest.raises(ValueError, match="failed ledgers"):
+        store.mark_chunk_done(20, 29, ok=9, failed=1)
     store.mark_chunk_done(10, 19, ok=10, failed=0)  # re-mark: no duplicate
-    assert store.done_chunks(0, 100) == {(10, 19), (20, 29)}
-    assert store.done_chunks(15, 100) == {(20, 29)}
+    assert store.done_chunks(0, 100) == {(10, 19)}
+    assert store.done_chunks(15, 100) == set()
     assert store.done_chunks(0, 25) == {(10, 19)}
 
 
@@ -165,3 +167,80 @@ def test_stats(store):
     store.save_ledger_bundle(*bundle(1))
     s = store.stats()
     assert s["failed"] == 0 and s["checkpoint"] == 0
+
+
+def test_incomplete_bundle_is_rejected_before_ledger_commit(store):
+    ledger, txs, metas = bundle(81)
+    with pytest.raises(ValueError, match="expected 2 transactions"):
+        store.save_ledger_bundle(ledger, txs, metas[:1])
+    assert store.ledgers.find_one({"block_number": 81}) is None
+
+
+def test_transaction_hash_cannot_be_overwritten_by_another_ledger(store):
+    first = bundle(82)
+    second = bundle(83)
+    second[1][0]["hash"] = first[1][0]["hash"]
+    second[2][0]["transaction_hash"] = first[1][0]["hash"]
+    store.save_ledger_bundle(*first)
+    with pytest.raises(Exception):
+        store.save_ledger_bundle(*second)
+    assert store.ledgers.find_one({"block_number": 83}) is None
+    assert store.txs.find_one({"hash": first[1][0]["hash"]})["block_number"] == 82
+
+
+def test_bundle_mismatch_and_progress_stages(store):
+    store.record_ledger_attempt(84)
+    assert store.ledger_progress(84, 85) == {
+        "attempted": 1, "ingested": 0, "verified": 0,
+        "attempted_contiguous": 1, "ingested_contiguous": 0, "verified_contiguous": 0,
+    }
+    store.save_ledger_bundle(*bundle(84))
+    assert store.ledger_progress(84, 84)["ingested_contiguous"] == 1
+    store.metas.delete_one({"block_number": 84})
+    assert store.bundle_mismatches(84, 84) == [(84, 2, 2, 1)]
+    assert store.ledger_progress(84, 84)["ingested_contiguous"] == 0
+
+
+def test_recovery_jobs_persist_claim_and_reject_stale_fencing_token(store):
+    from datetime import datetime, timedelta, timezone
+
+    job_id = store.schedule_recovery_range(90, 99, "not yet available",
+                                           blocked=True, retry_after_seconds=0)
+    now = datetime.now(timezone.utc)
+    claimed = store.claim_recovery_job("worker-a", now=now)
+    assert claimed["_id"] == job_id and claimed["fencing_token"] == 1
+    stolen = store.claim_recovery_job(
+        "worker-b", now=now + timedelta(seconds=301), lease_seconds=30)
+    assert stolen["_id"] == job_id and stolen["fencing_token"] == 2
+    assert not store.renew_recovery_lease(job_id, 1, now=now + timedelta(seconds=302))
+    assert not store.finish_recovery_job(job_id, 1, "verified")
+    assert store.finish_recovery_job(job_id, 2, "blocked", reason="source lacks range",
+                                     retry_after_seconds=60)
+    saved = store.recovery_jobs(status="blocked")
+    assert len(saved) == 1 and saved[0]["reason"] == "source lacks range"
+
+
+def test_recovery_lease_renewal_prevents_duplicate_claim(store):
+    from datetime import datetime, timedelta, timezone
+
+    job_id = store.schedule_recovery_range(100, 110, "long verification")
+    now = datetime.now(timezone.utc)
+    claimed = store.claim_recovery_job("worker-a", now=now, lease_seconds=300)
+    assert claimed["_id"] == job_id
+    assert store.renew_recovery_lease(
+        job_id, claimed["fencing_token"], now=now + timedelta(seconds=200),
+        lease_seconds=300)
+    assert store.claim_recovery_job(
+        "worker-b", now=now + timedelta(seconds=301), lease_seconds=300) is None
+
+
+def test_source_verification_advances_only_verified_progress(store):
+    store.record_ledger_attempt(100)
+    store.save_ledger_bundle(*bundle(100, 0))
+    store.schedule_recovery_range(100, 100, "verification pending")
+    before = store.ledger_progress(100, 100)
+    assert before["ingested_contiguous"] == 1 and before["verified_contiguous"] == 0
+    store.mark_ledgers_verified(100, 100)
+    after = store.ledger_progress(100, 100)
+    assert after["verified_contiguous"] == 1
+    assert store.recovery_jobs(status="verified")[0]["start"] == 100

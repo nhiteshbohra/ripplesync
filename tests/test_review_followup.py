@@ -19,7 +19,7 @@ def test_deep_repair_checks_hashes_of_newly_repaired_ledgers(store, initial):
         store.ledgers.update_one({"block_number": 10}, {"$set": {"num_transactions": 2}})
     bad = make_result(10)
     bad["ledger"]["transactions"][1]["hash"] = "UNEXPECTED"
-    source = FakeSource({10: [bad]})
+    source = FakeSource({10: [bad, bad]})
     # Initially the sole stored hash in the count case matches the node's initial list;
     # the node's list after the repair has the full two transactions.
     if initial == "count":

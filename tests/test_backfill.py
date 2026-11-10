@@ -36,12 +36,12 @@ def test_chunk_fetches_every_ledger_once_and_marks_done(store):
     assert store.ledgers.count_documents({}) == 10
 
 
-def test_chunk_with_failures_still_marked_done_and_failures_recorded(store):
+def test_chunk_with_failures_is_not_marked_done_and_failures_recorded(store):
     src = FakeSource({13: [RpcError("lgrNotFound")], 15: [RequestTimeout("t")] * 9})
     r = chunk_run(src, store, (10, 19))
     assert (r.ok, r.failed) == (8, 2)
     assert store.list_failed() == [13, 15]
-    assert store.done_chunks(0, 100) == {(10, 19)}
+    assert store.done_chunks(0, 100) == set()
 
 
 def test_systemic_rpc_error_aborts_chunk_without_marking_or_recording(store):

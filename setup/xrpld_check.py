@@ -97,7 +97,7 @@ def _backup(path: str) -> Optional[str]:
     return edit_cfg.backup(path)
 
 
-def run(cmd: str, cfg_path: str) -> Tuple[int, List[str]]:
+def run(cmd: str, cfg_path: str, *, overwrite_existing: bool = False) -> Tuple[int, List[str]]:
     try:
         cfg_text = _read(cfg_path)
         if cfg_text is None:
@@ -111,13 +111,24 @@ def run(cmd: str, cfg_path: str) -> Tuple[int, List[str]]:
         return (1 if found else 0), found
     if not found:
         return 0, ["nothing to fix"]
-    msgs = []
     new_vfile = os.path.join(os.path.dirname(os.path.abspath(cfg_path)), "validators.txt")
+    new_cfg = fixed_cfg(cfg_text)
+    if not overwrite_existing:
+        if cfg_text != new_cfg:
+            return 1, [
+                f"{cfg_path} needs validator configuration changes; it was not changed. "
+                "Review it and rerun fix with --overwrite-existing only if intended."
+            ]
+        if os.path.exists(new_vfile) and _read(new_vfile) != OFFICIAL_VALIDATORS_TXT:
+            return 1, [
+                f"{new_vfile} already exists with different contents; it was not changed. "
+                "Review it and rerun fix with --overwrite-existing only if intended."
+            ]
+    msgs = []
     for p in dict.fromkeys((cfg_path, vfile, new_vfile)):
         b = _backup(p)
         if b:
             msgs.append(f"backup: {b}")
-    new_cfg = fixed_cfg(cfg_text)
     # Publish the target first: interruption must never leave a dangling config pointer.
     edit_cfg.write_atomic(new_vfile, OFFICIAL_VALIDATORS_TXT)
     edit_cfg.write_atomic(cfg_path, new_cfg)
@@ -130,8 +141,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=("check", "fix"))
     ap.add_argument("--cfg", default="/etc/xrpld/xrpld.cfg")
+    ap.add_argument("--overwrite-existing", action="store_true",
+                    help="replace existing validator config/list after reviewing the changes")
     a = ap.parse_args(argv)
-    code, lines = run(a.command, a.cfg)
+    code, lines = run(a.command, a.cfg, overwrite_existing=a.overwrite_existing)
     for line in lines:
         print(line)
     if a.command == "check" and code == 0:

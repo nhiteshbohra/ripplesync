@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne
+from pymongo import (ASCENDING, DESCENDING, MongoClient, ReturnDocument, ReplaceOne,
+                     UpdateOne)
 
 from .config import Config
 from .errors import ConfigError
@@ -14,6 +15,8 @@ log = logging.getLogger(__name__)
 
 LAST_LEDGER_ID = "last_processed_ledger"
 CHUNK_KIND = "backfill_chunk"
+RECOVERY_KIND = "recovery_range"
+LEDGER_PROGRESS_KIND = "ledger_progress"
 
 
 def _now() -> datetime:
@@ -88,14 +91,21 @@ class MongoStore:
         key. No ledger in this batch is marked complete until ALL transaction and metadata
         writes succeed. The caller bounds batch size and isolates errors per ledger.
         """
-        tx_ops = [ReplaceOne({"hash": d["hash"]}, d, upsert=True)
+        for ledger_doc, tx_docs, meta_docs in bundles:
+            self._validate_bundle(ledger_doc, tx_docs, meta_docs)
+
+        tx_ops = [ReplaceOne({"hash": d["hash"], "block_number": d["block_number"]}, d,
+                             upsert=True)
                   for _, txs, _ in bundles for d in txs]
         if tx_ops:
             self.txs.bulk_write(tx_ops, ordered=False)
-        meta_ops = [ReplaceOne({"transaction_hash": d["transaction_hash"]}, d, upsert=True)
+        meta_ops = [ReplaceOne({"transaction_hash": d["transaction_hash"],
+                                "block_number": d["block_number"]}, d, upsert=True)
                     for _, _, metas in bundles for d in metas]
         if meta_ops:
             self.metas.bulk_write(meta_ops, ordered=False)
+        for ledger_doc, tx_docs, meta_docs in bundles:
+            self._verify_bundle_readback(ledger_doc, tx_docs, meta_docs)
         if len(bundles) == 1:
             d = bundles[0][0]
             self.ledgers.replace_one({"block_number": d["block_number"]}, d, upsert=True)
@@ -105,6 +115,55 @@ class MongoStore:
                  for d, _, _ in bundles], ordered=False)
         if bundles:
             self.failed.delete_many({"block_number": {"$in": [d["block_number"] for d, _, _ in bundles]}})
+            now = _now()
+            self.meta.bulk_write([
+                UpdateOne(
+                    {"_id": self._ledger_progress_id(d["block_number"])},
+                    {"$set": {"kind": LEDGER_PROGRESS_KIND, "ledger": d["block_number"],
+                              "status": "ingested", "verified": False,
+                              "updated_at": now}},
+                    upsert=True,
+                )
+                for d, _, _ in bundles
+            ], ordered=False)
+
+    @staticmethod
+    def _validate_bundle(ledger: Dict[str, Any], txs: List[Dict[str, Any]],
+                         metas: List[Dict[str, Any]]) -> None:
+        index = ledger.get("block_number")
+        expected = ledger.get("num_transactions")
+        if type(index) is not int or index < 0:
+            raise ValueError("ledger bundle has an invalid block_number")
+        if type(expected) is not int or expected != len(txs) or expected != len(metas):
+            raise ValueError(f"ledger {index}: expected {expected!r} transactions, "
+                             f"got {len(txs)} transaction and {len(metas)} metadata documents")
+        tx_hashes = [doc.get("hash") for doc in txs]
+        meta_hashes = [doc.get("transaction_hash") for doc in metas]
+        if (any(not isinstance(value, str) or not value for value in tx_hashes)
+                or len(set(tx_hashes)) != expected):
+            raise ValueError(f"ledger {index}: transaction hashes are missing or duplicated")
+        if (any(not isinstance(value, str) or not value for value in meta_hashes)
+                or set(tx_hashes) != set(meta_hashes)):
+            raise ValueError(f"ledger {index}: transaction and metadata hashes differ")
+        if any(doc.get("block_number") != index for doc in txs + metas):
+            raise ValueError(f"ledger {index}: child document belongs to another ledger")
+
+    def _verify_bundle_readback(self, ledger: Dict[str, Any], txs: List[Dict[str, Any]],
+                                metas: List[Dict[str, Any]]) -> None:
+        index = ledger["block_number"]
+        expected = {doc["hash"] for doc in txs}
+        tx_rows = list(self.txs.find({"block_number": index}, {"hash": 1, "_id": 0}))
+        meta_rows = list(self.metas.find(
+            {"block_number": index}, {"transaction_hash": 1, "_id": 0}))
+        actual = {doc["hash"] for doc in tx_rows if isinstance(doc.get("hash"), str)}
+        actual_meta = {doc["transaction_hash"] for doc in meta_rows
+                       if isinstance(doc.get("transaction_hash"), str)}
+        if (len(tx_rows) != len(txs) or actual != expected
+                or len(meta_rows) != len(metas) or actual_meta != expected):
+            raise RuntimeError(
+                f"ledger {index}: MongoDB read-back incomplete "
+                f"(transactions {len(actual)}/{len(expected)}, "
+                f"metadata {len(actual_meta)}/{len(expected)})")
 
     def highest_ledger(self) -> int:
         """Highest stored block_number (0 if none); uses the unique block_number index."""
@@ -151,6 +210,8 @@ class MongoStore:
         return f"{CHUNK_KIND}:{start}-{end}"
 
     def mark_chunk_done(self, start: int, end: int, ok: int, failed: int) -> None:
+        if failed:
+            raise ValueError("cannot mark a chunk done while it contains failed ledgers")
         self.meta.update_one(
             {"_id": self._chunk_id(start, end)},
             {"$set": {"kind": CHUNK_KIND, "start": start, "end": end, "ok": ok,
@@ -161,6 +222,193 @@ class MongoStore:
         cur = self.meta.find({"kind": CHUNK_KIND, "start": {"$gte": start}, "end": {"$lte": end}},
                              {"start": 1, "end": 1})
         return {(d["start"], d["end"]) for d in cur}
+
+    # -- durable range recovery / ledger progress --------------------------------
+
+    @staticmethod
+    def recovery_job_id(start: int, end: int) -> str:
+        return f"{RECOVERY_KIND}:{start}-{end}"
+
+    @staticmethod
+    def _ledger_progress_id(index: int) -> str:
+        return f"{LEDGER_PROGRESS_KIND}:{index}"
+
+    def schedule_recovery_range(self, start: int, end: int, reason: str, *,
+                                blocked: bool = False,
+                                retry_after_seconds: float = 0) -> str:
+        if start < 0 or end < start:
+            raise ValueError("recovery range must be a non-negative inclusive interval")
+        job_id = self.recovery_job_id(start, end)
+        now = _now()
+        self.meta.update_one(
+            {"_id": job_id},
+            {"$setOnInsert": {
+                "_id": job_id, "kind": RECOVERY_KIND, "start": start, "end": end,
+                "status": "blocked" if blocked else "pending", "attempts": 0,
+                "created_at": now,
+            }, "$set": {
+                "reason": reason, "updated_at": now,
+                "next_attempt_at": now + timedelta(seconds=max(0, retry_after_seconds)),
+            }},
+            upsert=True,
+        )
+        return job_id
+
+    def recovery_jobs(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = {"kind": RECOVERY_KIND}
+        if status is not None:
+            query["status"] = status
+        return list(self.meta.find(query, {"_id": 0}).sort(
+            [("start", ASCENDING), ("end", ASCENDING)]))
+
+    def claim_recovery_job(self, worker_id: str, *, now: Optional[datetime] = None,
+                           lease_seconds: int = 300) -> Optional[Dict[str, Any]]:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be >= 1")
+        now = now or _now()
+        return self.meta.find_one_and_update(
+            {"kind": RECOVERY_KIND, "status": {"$in": ["pending", "blocked", "running"]},
+             "next_attempt_at": {"$lte": now},
+             "$or": [{"status": {"$ne": "running"}}, {"lease_until": {"$lte": now}}]},
+            {"$set": {"status": "running", "worker_id": worker_id,
+                      "lease_until": now + timedelta(seconds=lease_seconds),
+                      "updated_at": now},
+             "$inc": {"attempts": 1, "fencing_token": 1}},
+            sort=[("start", ASCENDING), ("end", ASCENDING)],
+            return_document=ReturnDocument.AFTER,
+        )
+
+    def renew_recovery_lease(self, job_id: str, fencing_token: int, *,
+                             now: Optional[datetime] = None,
+                             lease_seconds: int = 300) -> bool:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be >= 1")
+        now = now or _now()
+        result = self.meta.update_one(
+            {"_id": job_id, "kind": RECOVERY_KIND, "status": "running",
+             "fencing_token": fencing_token},
+            {"$set": {"lease_until": now + timedelta(seconds=lease_seconds),
+                      "updated_at": now}},
+        )
+        return result.matched_count == 1
+
+    def finish_recovery_job(self, job_id: str, fencing_token: int, status: str, *,
+                            reason: Optional[str] = None,
+                            retry_after_seconds: float = 0) -> bool:
+        if status not in {"pending", "blocked", "ingested", "verified"}:
+            raise ValueError(f"invalid recovery status: {status}")
+        now = _now()
+        update = {"$set": {"status": status, "updated_at": now,
+                           "next_attempt_at": now + timedelta(
+                               seconds=max(0, retry_after_seconds))},
+                  "$unset": {"worker_id": "", "lease_until": ""}}
+        if reason is not None:
+            update["$set"]["reason"] = reason
+        else:
+            update["$unset"]["reason"] = ""
+        result = self.meta.update_one(
+            {"_id": job_id, "kind": RECOVERY_KIND, "status": "running",
+             "fencing_token": fencing_token},
+            update,
+        )
+        return result.modified_count == 1
+
+    def record_ledger_attempt(self, index: int) -> None:
+        progress_id = self._ledger_progress_id(index)
+        now = _now()
+        self.meta.update_one(
+            {"_id": progress_id},
+            {"$setOnInsert": {"_id": progress_id, "kind": LEDGER_PROGRESS_KIND,
+                              "ledger": index, "status": "attempted", "verified": False},
+             "$set": {"last_attempted_at": now, "updated_at": now},
+             "$inc": {"attempts": 1}},
+            upsert=True,
+        )
+
+    def mark_ledgers_verified(self, start: int, end: int) -> None:
+        if start > end:
+            return
+        self.meta.update_many(
+            {"kind": LEDGER_PROGRESS_KIND, "ledger": {"$gte": start, "$lte": end},
+             "status": "ingested"},
+            {"$set": {"verified": True, "verified_at": _now(), "updated_at": _now()}},
+        )
+        self.meta.update_many(
+            {"kind": RECOVERY_KIND, "start": {"$gte": start}, "end": {"$lte": end},
+             "status": {"$ne": "running"}},
+            {"$set": {"status": "verified", "verified_at": _now(), "updated_at": _now()},
+             "$unset": {"reason": "", "worker_id": "", "lease_until": ""}},
+        )
+
+    def _bundle_complete_numbers(self, start: int, end: int) -> Set[int]:
+        bad = {item[0] for item in self.bundle_mismatches(start, end)}
+        return {index for index in self.ledger_numbers(start, end) if index not in bad}
+
+    def ledger_progress(self, start: int, end: int) -> Dict[str, int]:
+        if start > end:
+            raise ValueError("start must be <= end")
+        complete = self._bundle_complete_numbers(start, end)
+        attempts = self.meta.find(
+            {"kind": LEDGER_PROGRESS_KIND, "ledger": {"$gte": start, "$lte": end},
+             "last_attempted_at": {"$exists": True}},
+            {"ledger": 1},
+        )
+        attempted_numbers = {doc["ledger"] for doc in attempts}
+        verified_numbers = {
+            doc["ledger"] for doc in self.meta.find(
+                {"kind": LEDGER_PROGRESS_KIND, "ledger": {"$gte": start, "$lte": end},
+                 "verified": True}, {"ledger": 1})
+        }
+
+        def contiguous(numbers: Set[int]) -> int:
+            index = start
+            while index <= end and index in numbers:
+                index += 1
+            return index - start
+
+        return {
+            "attempted": len(attempted_numbers),
+            "ingested": len(complete),
+            "verified": len(complete & verified_numbers),
+            "attempted_contiguous": contiguous(attempted_numbers),
+            "ingested_contiguous": contiguous(complete),
+            "verified_contiguous": contiguous(complete & verified_numbers),
+        }
+
+    def bundle_mismatches(self, start: int, end: int) -> List[Tuple[int, int, int, int]]:
+        """(ledger, expected txs, actual txs, actual metadata) count/hash integrity errors."""
+        ledgers = list(self.ledgers.find(
+            {"block_number": {"$gte": start, "$lte": end}},
+            {"block_number": 1, "num_transactions": 1, "_id": 0}))
+        if not ledgers:
+            return []
+        tx_by_ledger: Dict[int, Set[str]] = {}
+        meta_by_ledger: Dict[int, Set[str]] = {}
+        tx_count_by_ledger: Dict[int, int] = {}
+        meta_count_by_ledger: Dict[int, int] = {}
+        for doc in self.txs.find({"block_number": {"$gte": start, "$lte": end}},
+                                 {"block_number": 1, "hash": 1, "_id": 0}):
+            tx_by_ledger.setdefault(doc["block_number"], set()).add(doc.get("hash"))
+            tx_count_by_ledger[doc["block_number"]] = (
+                tx_count_by_ledger.get(doc["block_number"], 0) + 1)
+        for doc in self.metas.find({"block_number": {"$gte": start, "$lte": end}},
+                                   {"block_number": 1, "transaction_hash": 1, "_id": 0}):
+            meta_by_ledger.setdefault(doc["block_number"], set()).add(
+                doc.get("transaction_hash"))
+            meta_count_by_ledger[doc["block_number"]] = (
+                meta_count_by_ledger.get(doc["block_number"], 0) + 1)
+        out = []
+        for ledger in ledgers:
+            index = ledger["block_number"]
+            expected = ledger.get("num_transactions", 0)
+            tx_hashes = tx_by_ledger.get(index, set())
+            meta_hashes = meta_by_ledger.get(index, set())
+            if (tx_count_by_ledger.get(index, 0) != expected
+                    or meta_count_by_ledger.get(index, 0) != expected
+                    or tx_hashes != meta_hashes):
+                out.append((index, expected, tx_count_by_ledger.get(index, 0),
+                            meta_count_by_ledger.get(index, 0)))
+        return sorted(out)
 
     # -- failed ledgers ----------------------------------------------------------
 
@@ -237,6 +485,12 @@ class MongoStore:
         """Hashes of the stored transactions of one ledger."""
         return {d["hash"] for d in self.txs.find({"block_number": block_number},
                                                  {"hash": 1, "_id": 0}) if "hash" in d}
+
+    def metadata_docs(self, block_number: int) -> List[Dict[str, Any]]:
+        return list(self.metas.find({"block_number": block_number}, {"_id": 0}))
+
+    def ledger_doc(self, block_number: int) -> Optional[Dict[str, Any]]:
+        return self.ledgers.find_one({"block_number": block_number}, {"_id": 0})
 
     def find_tx(self, tx_hash: str) -> Optional[Dict[str, Any]]:
         return self.txs.find_one({"hash": tx_hash}, {"_id": 0})

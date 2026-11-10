@@ -39,7 +39,12 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
     database, it starts at the node's current ledger and logs the backfill for the hole.
     """
     last = await asyncio.to_thread(store.get_checkpoint)
-    highest = await asyncio.to_thread(store.highest_ledger) if last == 0 else 0
+    highest = await asyncio.to_thread(store.highest_ledger)
+    if last > highest:
+        await asyncio.to_thread(
+            store.schedule_recovery_range, highest + 1, last,
+            "tail checkpoint is ahead of stored ledger documents",
+            retry_after_seconds=60)
     iterations = 0
     node_failures = 0
     stalls = 0
@@ -71,6 +76,11 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
                             "starting at the current ledger %d. Fill the hole with: "
                             "python -m xrpl_ingest backfill --start %d --end %d",
                             highest, latest - highest, latest, highest + 1, latest - 1)
+                if latest - highest > BIG_GAP:
+                    await asyncio.to_thread(
+                        store.schedule_recovery_range, highest + 1, latest - 1,
+                        "tail startup found a historical gap behind the validated ledger",
+                        retry_after_seconds=60)
             else:
                 log.info("no checkpoint and no stored ledgers; starting at ledger %d", latest)
 
@@ -96,6 +106,9 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
             stalls = 0
             if not res.ok:
                 log.error("ledger %d recorded as failed; continuing", idx)
+                await asyncio.to_thread(
+                    store.schedule_recovery_range, idx, idx,
+                    res.error or "tail ingestion failed", retry_after_seconds=60)
             last = idx
             try:
                 await asyncio.to_thread(store.set_checkpoint, idx)

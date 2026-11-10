@@ -166,9 +166,9 @@ def test_repeated_config_edits_keep_all_backups(tmp_path, writer):
         intermediate = path.read_bytes()
         envfile.main([str(path), "DB_NAME=second"])
     elif writer == "node":
-        edit_cfg.main([str(path), "--db-path", "/first"])
+        edit_cfg.main([str(path), "--db-path", "/first", "--overwrite-existing"])
         intermediate = path.read_bytes()
-        edit_cfg.main([str(path), "--db-path", "/second"])
+        edit_cfg.main([str(path), "--db-path", "/second", "--overwrite-existing"])
     else:
         xrpld_check._backup(str(path))
         path.write_text("first", encoding="utf-8")
@@ -196,7 +196,7 @@ def test_validator_repair_interruption_preserves_config_target(tmp_path, monkeyp
 
     monkeypatch.setattr(edit_cfg, "write_atomic", interrupted)
     with pytest.raises(OSError, match="fixture disk failure"):
-        xrpld_check.run("fix", str(cfg))
+        xrpld_check.run("fix", str(cfg), overwrite_existing=True)
     assert cfg.read_text(encoding="utf-8") == "[validators_file]\ncustom.txt\n"
     assert Path(xrpld_check.validators_path(str(cfg), cfg.read_text())).exists()
     assert next(tmp_path.glob("validators.txt.bak.*")).read_text() == "old target"

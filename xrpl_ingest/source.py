@@ -29,9 +29,10 @@ async def _default_connect(url: str, *, timeout: float, max_size: int):
 class _Conn:
     """One live websocket plus its in-flight requests."""
 
-    def __init__(self, ws: Any, url: str):
+    def __init__(self, ws: Any, url: str, server_index: int):
         self.ws = ws
         self.url = redact_url(url)  # only used in messages; never carries credentials
+        self.server_index = server_index
         self.pending: Dict[int, asyncio.Future] = {}
         self.received = 0  # messages of any kind; unchanged over a timeout => hung
         self.last_rx = time.monotonic()  # for the log line only
@@ -95,6 +96,7 @@ class WsSource:
         self._conn: Optional[_Conn] = None
         self._lock: Optional[asyncio.Lock] = None
         self._ids = itertools.count(1)
+        self._next_server = 0
 
     @classmethod
     def from_config(cls, cfg: Config, **kw) -> "WsSource":
@@ -120,7 +122,9 @@ class WsSource:
     async def _open(self) -> _Conn:
         last: Optional[BaseException] = None
         mismatched = 0
-        for url in self.servers:
+        for offset in range(len(self.servers)):
+            server_index = (self._next_server + offset) % len(self.servers)
+            url = self.servers[server_index]
             for attempt in range(self.connect_retries):
                 if self._stop_check():  # before every attempt, so also right after a backoff
                     raise StopRequested("stopped: stop requested while connecting")
@@ -128,8 +132,9 @@ class WsSource:
                 try:
                     ws = await self._connect_fn(url, timeout=self.request_timeout,
                                                 max_size=self.max_message_bytes)
-                    conn = self._start(ws, url)
+                    conn = self._start(ws, url, server_index)
                     await self._check_network(conn)
+                    self._next_server = server_index
                     log.info("connected to %s", redact_url(url))
                     return conn
                 except asyncio.CancelledError:
@@ -154,8 +159,8 @@ class WsSource:
             raise NetworkMismatch(redact_url(f"every server is on the wrong network: {last}"))
         raise ConnectFailed(redact_url(f"all servers failed: {last}"))  # e may quote the URL
 
-    def _start(self, ws: Any, url: str) -> _Conn:
-        conn = _Conn(ws, url)
+    def _start(self, ws: Any, url: str, server_index: int) -> _Conn:
+        conn = _Conn(ws, url, server_index)
         conn.reader = asyncio.get_running_loop().create_task(self._read_loop(conn))
         return conn
 
@@ -197,6 +202,23 @@ class WsSource:
     async def close(self) -> None:
         conn, self._conn = self._conn, None
         await self._drop(conn)
+
+    async def failover(self) -> bool:
+        """Rotate to the next endpoint when an RPC error may be endpoint-specific."""
+        if len(self.servers) < 2:
+            return False
+        conn = self._conn
+        if conn is None:
+            return False
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._conn is not conn:
+                return False
+            self._next_server = (conn.server_index + 1) % len(self.servers)
+            self._conn = None
+            await self._drop(conn, "endpoint-specific RPC error; switching endpoint")
+            return True
 
     async def _check_network(self, conn: _Conn) -> None:
         if self.expected_network_id is None:
@@ -272,7 +294,12 @@ class WsSource:
 
     async def request(self, command: str, **params: Any) -> Dict[str, Any]:
         conn = await self._get_conn()
-        return await self._request_on(conn, command, **params)
+        try:
+            return await self._request_on(conn, command, **params)
+        except RpcError as e:
+            if e.retryable:
+                await self.failover()
+            raise
 
     # -- typed helpers -----------------------------------------------------------
 

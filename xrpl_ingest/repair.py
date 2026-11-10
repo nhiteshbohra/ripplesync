@@ -21,8 +21,8 @@ from typing import (Any, Callable, Dict, Iterable, Iterator, List, Optional, Seq
 
 from .errors import MalformedLedger, NotValidated, StopRequested, is_retryable
 from .fetcher import IngestResult, RetryPolicy, Sleep, ingest_ledger
-from .ledger_ranges import Range
-from .transform import to_int
+from .ledger_ranges import Range, subtract
+from .transform import parse_ledger_result, to_int
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,8 @@ class RepairSummary:
     node_lacks: int = 0  # bad, but outside the node's complete_ledgers: not attempted
     chain_breaks: int = 0
     hash_mismatches: int = 0
+    metadata_mismatches: int = 0
+    ledger_hash_mismatches: int = 0
     unchecked: int = 0  # deep: the node could not give the hash list (after retries)
     remaining: int = 0  # problems found again after repairing (or found, without repair)
     stopped: bool = False
@@ -243,14 +245,88 @@ class _Window:
     breaks: List[ChainBreak]
     diffs: List[HashDiff]
     unchecked: List[Tuple[int, str]]
+    payload_mismatches: List[Tuple[int, str]]
     stopped: bool = False
 
     def bad_ledgers(self) -> List[int]:
-        return ledgers_to_repair(self.gaps, self.mismatches,
-                                 [d.block_number for d in self.diffs])
+        return ledgers_to_repair(
+            self.gaps, self.mismatches,
+            [d.block_number for d in self.diffs]
+            + [index for index, _ in self.payload_mismatches])
 
     def count(self) -> int:
         return len(self.bad_ledgers()) + len(self.breaks) + len(self.unchecked)
+
+
+async def compare_ledger_payloads(source: Any, store: Any, indices: List[int], *,
+                                  retry: RetryPolicy, concurrency: int,
+                                  stop_check: Callable[[], bool],
+                                  sleep: Sleep = asyncio.sleep
+                                  ) -> Tuple[List[Tuple[int, str]], List[Tuple[int, str]], bool]:
+    """Compare persisted ledger and full metadata documents with independent source payloads."""
+    mismatches: List[Tuple[int, str]] = []
+    unchecked: List[Tuple[int, str]] = []
+    stopped = False
+    it = iter(indices)
+
+    async def worker() -> None:
+        nonlocal stopped
+        for index in it:
+            if stop_check():
+                stopped = True
+                return
+            try:
+                result = await _fetch_ledger(source, index, retry, sleep)
+                expected_ledger, _, expected_metadata = parse_ledger_result(index, result)
+                actual_ledger = await asyncio.to_thread(store.ledger_doc, index)
+                actual_metadata = await asyncio.to_thread(store.metadata_docs, index)
+                if actual_ledger is None:
+                    mismatches.append((index, "stored ledger document is missing"))
+                    continue
+                # Public endpoints decorate the same ledger with different API annotations.
+                for doc in (expected_ledger, actual_ledger):
+                    doc.pop("_inserted_at", None)
+                    doc.pop("_id", None)
+                    doc.pop("warnings", None)
+                    doc.pop("node_warnings", None)
+                if actual_ledger != expected_ledger:
+                    mismatches.append((index, "ledger fields differ from source"))
+                    continue
+                expected_by_hash = {doc["transaction_hash"]: doc for doc in expected_metadata}
+                actual_by_hash = {doc["transaction_hash"]: doc for doc in actual_metadata}
+                if set(expected_by_hash) != set(actual_by_hash):
+                    mismatches.append((index, "metadata transaction hashes differ from source"))
+                    continue
+                for docs in (expected_by_hash, actual_by_hash):
+                    for doc in docs.values():
+                        doc.pop("_inserted_at", None)
+                        doc.pop("_id", None)
+                        meta = doc.get("meta")
+                        if isinstance(meta, dict):
+                            for key in ("offer_id", "nftoken_id", "nftoken_ids"):
+                                meta.pop(key, None)
+                if expected_by_hash != actual_by_hash:
+                    mismatches.append((index, "metadata contents differ from source"))
+            except StopRequested:
+                stopped = True
+                return
+            except Exception as e:  # noqa: BLE001 - individual source/document failures are reported
+                unchecked.append((index, f"{type(e).__name__}: {e}"))
+
+    await asyncio.gather(*(worker() for _ in range(max(1, concurrency))))
+    return (sorted(mismatches), sorted(unchecked),
+            stopped or stop_check())
+
+
+async def _fetch_ledger(source: Any, index: int, retry: RetryPolicy, sleep: Sleep) -> Dict[str, Any]:
+    for attempt in range(retry.attempts):
+        try:
+            return await source.get_ledger(index)
+        except Exception as e:  # noqa: BLE001 - classified below
+            if isinstance(e, StopRequested) or not is_retryable(e) or attempt == retry.attempts - 1:
+                raise
+            await sleep(retry.delay(attempt))
+    raise AssertionError("unreachable")
 
 
 async def _check_window(source: Any, store: Any, a: int, b: int, *, deep: bool,
@@ -259,7 +335,7 @@ async def _check_window(source: Any, store: Any, a: int, b: int, *, deep: bool,
                         sleep: Sleep) -> _Window:
     """`only`: limit the node hash comparison to these ledgers (re-check after a repair)."""
     gaps, mismatches = await find_problems(store, a, b)
-    w = _Window(gaps, mismatches, [], [], [])
+    w = _Window(gaps, mismatches, [], [], [], [])
     if not deep:
         return w
     w.breaks = await chain_breaks(store, a, b)
@@ -267,11 +343,40 @@ async def _check_window(source: Any, store: Any, a: int, b: int, *, deep: bool,
         return w
     stored = await asyncio.to_thread(store.ledger_numbers, a, b)
     wanted = set(only) if only is not None else None
-    targets = [n for n in stored if on_node(n, node_ranges) and (wanted is None or n in wanted)]
-    w.diffs, w.unchecked, w.stopped = await compare_hashes(
+    selected = [n for n in stored if wanted is None or n in wanted]
+    targets = [n for n in selected if on_node(n, node_ranges)]
+    w.unchecked.extend(
+        (n, "source complete_ledgers does not include this ledger")
+        for n in selected if not on_node(n, node_ranges))
+    w.diffs, hash_unchecked, w.stopped = await compare_hashes(
         source, store, targets, retry=retry, concurrency=concurrency, stop_check=stop_check,
         sleep=sleep)
+    w.unchecked.extend(hash_unchecked)
+    if not w.stopped:
+        w.payload_mismatches, payload_unchecked, stopped = await compare_ledger_payloads(
+            source, store, targets, retry=retry, concurrency=concurrency,
+            stop_check=stop_check, sleep=sleep)
+        w.unchecked.extend(payload_unchecked)
+        w.stopped = stopped
     return w
+
+
+async def _schedule_window_issues(store: Any, window: _Window,
+                                  node_ranges: Sequence[Range]) -> None:
+    schedule = getattr(store, "schedule_recovery_range", None)
+    if schedule is None:
+        return
+    ranges = list(window.gaps)
+    ranges.extend((index, index) for index, _, _ in window.mismatches)
+    ranges.extend((diff.block_number, diff.block_number) for diff in window.diffs)
+    ranges.extend((index, index) for index, _ in window.payload_mismatches)
+    ranges.extend((item.block_number, item.block_number) for item in window.breaks)
+    ranges.extend((index, index) for index, _ in window.unchecked)
+    for start, end in ranges:
+        available = not subtract(start, end, node_ranges)
+        await asyncio.to_thread(
+            schedule, start, end, "verification found an incomplete or mismatched ledger",
+            blocked=not available, retry_after_seconds=60)
 
 
 async def repair_range(source: Any, store: Any, start: int, end: int,
@@ -293,20 +398,31 @@ async def repair_range(source: Any, store: Any, start: int, end: int,
                                 only=None, **kw)
         lines = describe_problems(w.gaps, w.mismatches) + describe_breaks(w.breaks)
         lines += [describe_diff(d) for d in w.diffs]
+        lines += [f"ledger {n}: {problem}" for n, problem in w.payload_mismatches]
         lines += [f"ledger {n}: could not compare with node: {err}" for n, err in w.unchecked]
         for line in lines:
             emit(line)
         todo = w.bad_ledgers()
+        if source is not None and node_ranges is not None and todo:
+            await _schedule_window_issues(store, w, node_ranges)
         s.found += len(todo)
         s.chain_breaks += len(w.breaks)
         s.hash_mismatches += len(w.diffs)
+        ledger_diff_count = sum(
+            1 for _, problem in w.payload_mismatches if problem.startswith("ledger fields"))
+        s.ledger_hash_mismatches += ledger_diff_count
+        s.metadata_mismatches += len(w.payload_mismatches) - ledger_diff_count
         s.unchecked += len(w.unchecked)
         stopped = w.stopped
+        remaining_before = s.remaining
         if repair and todo and not stopped and source is not None and node_ranges is not None:
             stopped = await _repair_window(source, store, a, b, w, todo, node_ranges, s, emit,
                                            deep=deep, **kw)
         else:
             s.remaining += w.count()
+        if (deep and source is not None and node_ranges is not None and not stopped
+                and s.remaining == remaining_before):
+            await asyncio.to_thread(store.mark_ledgers_verified, a, b)
         if stopped:
             s.stopped = True
             break
@@ -346,6 +462,7 @@ async def _repair_window(source: Any, store: Any, a: int, b: int, w: _Window, to
     again.unchecked += [u for u in w.unchecked if u[0] not in {x[0] for x in again.unchecked}]
     lines = describe_problems(again.gaps, again.mismatches) + describe_breaks(again.breaks)
     lines += [describe_diff(d) for d in again.diffs]
+    lines += [f"ledger {n}: {problem}" for n, problem in again.payload_mismatches]
     lines += [f"ledger {n}: could not compare with node: {err}" for n, err in again.unchecked]
     for line in lines:
         emit(line + " (after repair)")

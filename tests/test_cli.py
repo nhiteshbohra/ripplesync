@@ -62,7 +62,8 @@ def test_main_help_lists_every_exit_code_as_a_table():
 def test_dispatch_is_a_mapping_with_a_parser_for_every_command():
     choices = build_parser()._subparsers._group_actions[0].choices
     assert set(COMMANDS) == set(choices)
-    assert {n for n, c in COMMANDS.items() if c.ingest} == {"backfill", "tail", "retry-failed"}
+    assert {n for n, c in COMMANDS.items() if c.ingest} == {
+        "backfill", "tail", "retry-failed", "recover-gaps", "reconcile"}
 
 
 # -- .env lookup: real paths.load_env, synthetic files in tmp_path only --------------

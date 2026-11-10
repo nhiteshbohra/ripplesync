@@ -34,8 +34,9 @@ glibc_version() {
   printf '%s' "$v"
 }
 
-# check_platform: the XRPLF .deb needs glibc >= 2.31 on x86_64 (xrpl.org: Ubuntu 20.04+ or
-# Debian 11+). Newer releases (e.g. Ubuntu 26.04, Debian 12/13) pass without a warning.
+# check_platform: the reviewed installer matrix is Ubuntu 20.04/22.04/24.04 and Debian
+# 11/12 on x86_64. XRPLF publishes the package for glibc >= 2.31; MongoDB auto-install
+# is Ubuntu-only, so Debian requires an existing/local or external MongoDB.
 # Sources /etc/os-release, so ID, VERSION_CODENAME, UBUNTU_CODENAME, PRETTY_NAME are set after.
 check_platform() {
   local arch glibc
@@ -45,11 +46,28 @@ check_platform() {
   glibc="$(glibc_version)"
   echo "OS: ${PRETTY_NAME:-unknown}   arch: $arch   glibc: ${glibc:-?}   WSL: $(is_wsl && echo yes || echo no)   systemd: $(has_systemd && echo yes || echo no)"
   [ "$arch" = x86_64 ] || need_ok "architecture is $arch; the XRPLF xrpld packages are for x86_64"
+  case "${ID:-}:${VERSION_ID:-}" in
+    ubuntu:20.04|ubuntu:22.04|ubuntu:24.04|debian:11|debian:12) ;;
+    *) need_ok "distribution/version ${ID:-unknown} ${VERSION_ID:-unknown} is outside the reviewed matrix (Ubuntu 20.04/22.04/24.04; Debian 11/12)" ;;
+  esac
   if [ -z "$glibc" ]; then
     need_ok "cannot determine the glibc version (the xrpld package needs glibc >= 2.31)"
   elif ! version_ge "$glibc" 2.31; then
     need_ok "glibc $glibc is older than 2.31; the xrpld package needs Ubuntu 20.04+ or Debian 11+"
   fi
+}
+
+# install_file_if_absent_or_same SOURCE DEST MODE: preserve any operator-managed file.
+install_file_if_absent_or_same() {
+  local src="$1" dst="$2" mode="$3"
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if [ -f "$dst" ] && cmp -s -- "$src" "$dst"; then
+      say "$dst already matches; leaving it unchanged"
+      return 0
+    fi
+    die "$dst already exists and differs; it was not overwritten. Review it and move it aside explicitly before retrying."
+  fi
+  $SUDO install -m "$mode" "$src" "$dst"
 }
 
 python312_hint() {
@@ -190,7 +208,7 @@ print_key_fprs() {
 # install_xrplf_key: download the XRPLF apt key and refuse it unless it is exactly the one
 # key whose fingerprint xrpl.org publishes.
 install_xrplf_key() {
-  local tmp fprs
+  local tmp fprs existing_fprs
   tmp="$(mktemp)"
   if ! wget -qO "$tmp" "$XRPLF_KEY_URL"; then rm -f "$tmp"; die "download failed: $XRPLF_KEY_URL"; fi
   fprs="$(print_key_fprs "$tmp" || true)"
@@ -199,17 +217,30 @@ install_xrplf_key() {
     die "XRPLF key fingerprint mismatch: expected $XRPLF_KEY_FPR (xrpl.org install docs), got '${fprs:-none}'. Not installing it; check https://xrpl.org/docs/infrastructure/installation/install-xrpld-on-ubuntu"
   fi
   $SUDO install -m 0755 -d "$(dirname "$XRPLF_KEYRING")"
-  $SUDO install -m 0644 "$tmp" "$XRPLF_KEYRING"
+  if [ -e "$XRPLF_KEYRING" ] || [ -L "$XRPLF_KEYRING" ]; then
+    existing_fprs="$(print_key_fprs "$XRPLF_KEYRING" || true)"
+    [ "$existing_fprs" = "$XRPLF_KEY_FPR" ] || {
+      rm -f "$tmp"
+      die "$XRPLF_KEYRING already exists with a different key; it was not overwritten"
+    }
+    say "existing XRPLF keyring has the pinned fingerprint; leaving it unchanged"
+  else
+    install_file_if_absent_or_same "$tmp" "$XRPLF_KEYRING" 0644
+  fi
   rm -f "$tmp"
   say "XRPLF key OK (fingerprint $XRPLF_KEY_FPR matches the pinned value)"
 }
 
 install_xrpld_pkg() {
+  local list_tmp
   say "Installing xrpld (official XRPLF apt repo)"
   $SUDO apt-get -y update
   $SUDO apt-get -y install apt-transport-https ca-certificates wget gnupg python3
   install_xrplf_key
-  echo "$XRPLF_APT_LINE" | $SUDO tee /etc/apt/sources.list.d/xrplf.list >/dev/null
+  list_tmp="$(mktemp)"
+  printf '%s\n' "$XRPLF_APT_LINE" >"$list_tmp"
+  install_file_if_absent_or_same "$list_tmp" /etc/apt/sources.list.d/xrplf.list 0644
+  rm -f "$list_tmp"
   $SUDO apt-get -y update
   $SUDO apt-get -y install xrpld
 }
@@ -288,8 +319,11 @@ EOF
 # install_mongodb: MongoDB 8.0 from the official repo on Ubuntu 20.04/22.04/24.04.
 # Skipped on WSL (MongoDB does not support WSL). Other releases: stop with a message.
 install_mongodb() {
-  local codename tmp fprs list=/etc/apt/sources.list.d/mongodb-org-$MONGO_SERIES.list
+  local codename tmp fprs existing_fprs key_tmp list_tmp
   if is_wsl; then wsl_mongo_notes; return 0; fi
+  if [ -f /etc/mongod.conf ]; then
+    die "/etc/mongod.conf already exists but mongod is not installed/running; refusing package installation over an existing MongoDB configuration. Inspect it and install/start MongoDB manually."
+  fi
   codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"  # derivatives (Mint, Pop!_OS) set UBUNTU_CODENAME
   case "$codename" in
     focal|jammy|noble) ;;
@@ -304,11 +338,24 @@ install_mongodb() {
   # Trust on first use: we have no officially published fingerprint to pin for this key.
   echo "MongoDB $MONGO_SERIES signing key fingerprint(s), NOT pinned (trust on first use):"
   printf '    %s\n' "${fprs:-<none parsed>}"
-  $SUDO gpg --batch --yes --dearmor -o "$MONGO_KEYRING" <"$tmp"
-  $SUDO chmod 0644 "$MONGO_KEYRING"
+  key_tmp="$(mktemp)"
+  gpg --batch --yes --dearmor -o "$key_tmp" <"$tmp"
+  if [ -e "$MONGO_KEYRING" ] || [ -L "$MONGO_KEYRING" ]; then
+    existing_fprs="$(print_key_fprs "$MONGO_KEYRING" || true)"
+    [ "$existing_fprs" = "$fprs" ] || {
+      rm -f "$tmp" "$key_tmp"
+      die "$MONGO_KEYRING already exists with different key material; it was not overwritten"
+    }
+    say "existing MongoDB keyring has the downloaded fingerprint; leaving it unchanged"
+  else
+    install_file_if_absent_or_same "$key_tmp" "$MONGO_KEYRING" 0644
+  fi
+  rm -f "$key_tmp"
   rm -f "$tmp"
-  echo "deb [ arch=amd64,arm64 signed-by=$MONGO_KEYRING ] https://repo.mongodb.org/apt/ubuntu $codename/mongodb-org/$MONGO_SERIES multiverse" \
-    | $SUDO tee "$list" >/dev/null
+  list_tmp="$(mktemp)"
+  printf '%s\n' "deb [ arch=amd64,arm64 signed-by=$MONGO_KEYRING ] https://repo.mongodb.org/apt/ubuntu $codename/mongodb-org/$MONGO_SERIES multiverse" >"$list_tmp"
+  install_file_if_absent_or_same "$list_tmp" "/etc/apt/sources.list.d/mongodb-org-$MONGO_SERIES.list" 0644
+  rm -f "$list_tmp"
   $SUDO apt-get -y update
   $SUDO apt-get -y install mongodb-org
   if has_systemd; then
@@ -358,11 +405,20 @@ unit_value_problem() {
 # and USER into /etc/systemd/system and daemon-reload. Enables neither. Returns 1 (after a
 # warning) if the units cannot be installed safely.
 install_ingest_units() {
-  local user="$1" why name src dst tmp esc_repo esc_user
+  local user="$1" why name src dst tmp esc_repo esc_user i changed=0
+  local -a rendered=() destinations=()
   has_systemd || { warn "no systemd: service units not installed (run tail/backfill by hand, see next steps)"; return 1; }
   case "$user" in
     ""|root) warn "not installing the xrpl-* units: they would run as root; re-run as a normal user (with sudo)"; return 1 ;;
   esac
+  id "$user" >/dev/null 2>&1 || { warn "service account '$user' does not exist"; return 1; }
+  if ! $SUDO -u "$user" test -x "$REPO_DIR" ||
+     ! $SUDO -u "$user" test -r "$REPO_DIR/.venv/bin/python" ||
+     { [ -f "$REPO_DIR/.env" ] && ! $SUDO -u "$user" test -r "$REPO_DIR/.env"; } ||
+     ! $SUDO -u "$user" test -w "$REPO_DIR"; then
+    warn "service account '$user' must be able to traverse/read the repo, read .env (if present), and write the repo for locks/control files/logs"
+    return 1
+  fi
   why="$(unit_value_problem "$REPO_DIR")"
   [ -z "$why" ] || { warn "not installing the xrpl-* units: repo path '$REPO_DIR' $why; move the repo to a plain path"; return 1; }
   esc_repo="$(sed_escape_repl "$REPO_DIR")"
@@ -377,11 +433,27 @@ install_ingest_units() {
     if grep -v '^[[:space:]]*[#;]' "$tmp" | grep -q '@[A-Z_]*@'; then
       rm -f "$tmp"; die "unreplaced placeholder left in rendered $name.service"
     fi
-    $SUDO install -m 0644 "$tmp" "$dst"
-    rm -f "$tmp"
-    say "installed $dst (User=$user, not enabled)"
+    if { [ -e "$dst" ] || [ -L "$dst" ]; } && ! cmp -s -- "$tmp" "$dst"; then
+      rm -f "$tmp" "${rendered[@]}"
+      warn "$dst already exists and differs; it was not overwritten. Review/merge the unit explicitly."
+      return 1
+    fi
+    rendered+=("$tmp")
+    destinations+=("$dst")
   done
-  $SUDO systemctl daemon-reload
+  for i in "${!rendered[@]}"; do
+    tmp="${rendered[$i]}"
+    dst="${destinations[$i]}"
+    if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+      $SUDO install -m 0644 "$tmp" "$dst"
+      changed=1
+      say "installed $dst (User=$user, not enabled)"
+    else
+      say "$dst already matches; leaving it unchanged"
+    fi
+    rm -f "$tmp"
+  done
+  [ "$changed" = 0 ] || $SUDO systemctl daemon-reload
 }
 
 # print_next_steps UNITS_INSTALLED(0|1)

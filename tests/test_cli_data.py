@@ -120,6 +120,13 @@ def test_plain_verify_unchanged_needs_no_node(cli_main, dead_node, store, capsys
     assert capsys.readouterr().out.strip() == "OK"
 
 
+def test_plain_verify_detects_incomplete_metadata_bundle(cli_main, store, capsys):
+    save(store, 1)
+    store.metas.delete_one({"transaction_hash": "H1_0"})
+    assert cli_main(["verify", "--start", "1", "--end", "1"]) == 1
+    assert "incomplete transaction/metadata bundle" in capsys.readouterr().out
+
+
 # -- verify --deep --------------------------------------------------------------------------
 
 def test_verify_deep_clean_exits_0(cli_main, node, store, capsys):
@@ -134,7 +141,7 @@ def test_verify_deep_hash_mismatch_exits_1(cli_main, node, store, capsys):
     store.txs.update_one({"hash": "H2_0"}, {"$set": {"hash": "BOGUS"}})
     assert cli_main(["verify", "--start", "1", "--end", "3", "--deep"]) == 1
     assert "ledger 2: tx hashes differ from node" in capsys.readouterr().out
-    assert node.calls == []  # no repair without --repair
+    assert node.calls == [1, 2, 3]  # deep verification fetches expanded payloads without repair
 
 
 def test_verify_deep_without_node_runs_offline_checks(cli_main, dead_node, store, capsys):
@@ -156,7 +163,8 @@ def test_verify_deep_repair_fixes_hash_mismatch(cli_main, node, store, capsys):
     store.txs.delete_one({"hash": "H2_1"})
     store.ledgers.update_one({"block_number": 2}, {"$set": {"num_transactions": 1}})
     assert cli_main(["verify", "--start", "1", "--end", "3", "--deep", "--repair"]) == 0
-    assert node.calls == [2] and store.tx_hashes(2) == {"H2_0", "H2_1"}
+    assert sorted(node.calls) == [1, 2, 2, 2, 3]
+    assert store.tx_hashes(2) == {"H2_0", "H2_1"}
 
 
 def test_verify_deep_repair_without_node_exits_4(cli_main, dead_node, store):

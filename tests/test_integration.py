@@ -102,7 +102,7 @@ def test_oversized_ledger_failure_records_websocket_1009_reason(cfg, node):
         assert store.list_failed() == [big]
         reason = store.failed.find_one({"block_number": big})["reason"]
         assert "1009" in reason and "message too big" in reason, reason
-        assert store.done_chunks(LO, LO + 29) == {(LO + 20, LO + 29)}  # recorded => marked
+        assert store.done_chunks(LO, LO + 29) == set()  # failed ledgers keep the chunk recoverable
     finally:
         store.close()
 

@@ -99,7 +99,7 @@ def test_bad_ledger_in_batch_is_isolated_without_refetching_neighbours(store, mo
     assert sorted(src.calls) == list(range(10, 20))
     assert store.list_failed() == [13]
     assert store.ledgers.count_documents({}) == 9
-    assert store.done_chunks(10, 19) == {(10, 19)}
+    assert store.done_chunks(10, 19) == set()
 
 
 def test_pipeline_database_outage_leaves_chunk_unmarked_without_refetching(store, monkeypatch):

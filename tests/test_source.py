@@ -6,10 +6,10 @@ import pytest
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
-from conftest import FakeWs, no_sleep
+from conftest import FakeWs, make_result, no_sleep
 from xrpl_ingest.errors import (ConnectFailed, ConnectionLost, NetworkMismatch, RequestTimeout,
                                 RpcError, StopRequested, TransientError, is_retryable)
-from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger
+from xrpl_ingest.fetcher import RetryPolicy, ingest_ledger, prepare_ledger
 from xrpl_ingest.source import WsSource, redact_url
 
 
@@ -102,6 +102,62 @@ def test_slowdown_is_retryable():
     assert RpcError("slowDown").retryable and RpcError("noNetwork").retryable
     assert not RpcError("invalidParams").retryable and RpcError("invalidParams").fatal
     assert RpcError("noPermission").fatal and not RpcError("lgrNotFound").fatal
+
+
+def test_retryable_rate_limit_rotates_to_next_endpoint():
+    attempts = []
+
+    async def connect(url, **_):
+        attempts.append(url)
+
+        def handler(req):
+            if url == "ws://a" and req["command"] == "ledger":
+                return {"id": req["id"], "status": "error", "error": "tooBusy"}
+            return default_handler(req)
+
+        return FakeWs(handler)
+
+    async def go():
+        s = make_source(connect)
+        try:
+            with pytest.raises(RpcError, match="tooBusy"):
+                await s.get_ledger(1)
+            result = await s.get_ledger(1)
+            return result
+        finally:
+            await s.close()
+
+    assert run(go())["validated"] is True
+    assert attempts == ["ws://a", "ws://b"]
+
+
+def test_missing_historical_range_tries_next_endpoint():
+    attempts = []
+
+    async def connect(url, **_):
+        attempts.append(url)
+
+        def handler(req):
+            if url == "ws://a" and req["command"] == "ledger":
+                return {"id": req["id"], "status": "error", "error": "lgrNotFound"}
+            if req["command"] == "ledger":
+                return ok(req, make_result(req["ledger_index"]))
+            return default_handler(req)
+
+        return FakeWs(handler)
+
+    async def go():
+        source = make_source(connect)
+        try:
+            return await prepare_ledger(
+                source, 1, RetryPolicy(attempts=2, base=0, max_delay=0, jitter=False),
+                sleep=no_sleep)
+        finally:
+            await source.close()
+
+    bundle = run(go())
+    assert bundle[0]["block_number"] == 1
+    assert attempts == ["ws://a", "ws://b"]
 
 
 def test_timeout_raises_and_pending_cleaned():

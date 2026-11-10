@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from .config import MAX_BACKOFF_EXPONENT, redact_url
-from .errors import StopRequested, is_retryable
+from .errors import RpcError, StopRequested, is_retryable
 from .transform import parse_ledger_result
 
 log = logging.getLogger(__name__)
@@ -69,6 +69,14 @@ async def prepare_ledger(source: Any, index: int, retry: RetryPolicy, *,
                 if timings is not None:
                     timings["transform_seconds"] = timings.get("transform_seconds", 0) + time.perf_counter() - started
         except Exception as e:
+            if (isinstance(e, RpcError) and e.error == "lgrNotFound"
+                    and attempt < retry.attempts - 1):
+                failover = getattr(source, "failover", None)
+                if failover is not None and await failover():
+                    log.info("ledger %d: source lacks this range; trying the next endpoint",
+                             index)
+                    await sleep(retry.delay(attempt))
+                    continue
             if not is_retryable(e) or attempt == retry.attempts - 1:
                 raise
             log.warning("ledger %d: fetch/transform attempt %d/%d failed: %s", index, attempt + 1, retry.attempts, redact_url(str(e)))
@@ -125,6 +133,9 @@ async def ingest_ledger(source: Any, store: Any, index: int, retry: RetryPolicy,
                         clear_failure: bool = False, sleep: Sleep = asyncio.sleep) -> IngestResult:
     """Never raises (except cancellation). Reuses prepared data on database retries."""
     try:
+        record_attempt = getattr(store, "record_ledger_attempt", None)
+        if record_attempt is not None:
+            await asyncio.to_thread(record_attempt, index)
         bundle = await prepare_ledger(source, index, retry, sleep=sleep)
         await persist_bundles(store, [bundle], retry, clear_failure=clear_failure, sleep=sleep)
         return IngestResult(index, True, len(bundle[1]))
