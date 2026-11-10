@@ -51,3 +51,7 @@ USER_CHAOS_REVIEW.md
 
 # Local chaos-review report and reproduction script
 reviews
+!reviews/
+reviews/*
+!reviews/_clio_driver.py
+!reviews/_plumb.py

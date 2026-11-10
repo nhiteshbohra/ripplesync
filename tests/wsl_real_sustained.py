@@ -40,14 +40,14 @@ def enough_memory(available, swap_free, windows_mb, chunk_bytes, workers):
 
 
 def node_ready(info):
-    ledger = info.get('validated_ledger', {})
+    ledger = info.get('validated_ledger') or {}
     age = ledger.get('age')
     return (info.get('server_state') in ('full', 'proposing', 'validating')
             and type(ledger.get('seq')) is int and ledger['seq'] > 0
             and type(age) in (int, float) and 0 <= age <= 30)
 
 
-if '--self-check' in sys.argv:
+if __name__ == '__main__' and '--self-check' in sys.argv:
     assert benchmark_range({'validated_ledger': {'seq': 1000}, 'complete_ledgers': '1-500,900-1000'}) == (900, 998)
     assert enough_memory(8 * 1024**3, 2 * 1024**3, 3000, 1024**2, 4)
     assert not enough_memory(2 * 1024**3, 2 * 1024**3, 3000, 1024**2, 4)
@@ -55,6 +55,7 @@ if '--self-check' in sys.argv:
     assert node_ready({'server_state': 'full', 'validated_ledger': {'seq': 1000, 'age': 2}})
     assert not node_ready({'server_state': 'tracking', 'validated_ledger': {'seq': 1000, 'age': 2}})
     assert not node_ready({'server_state': 'full', 'validated_ledger': {'seq': 1000, 'age': 300}})
+    assert not node_ready({'server_state': 'connected', 'validated_ledger': None})
     print('PASS real-throughput range selection and resource preconditions')
     raise SystemExit(0)
 
@@ -79,12 +80,9 @@ def host_resources():
     windows_script = subprocess.check_output(['wslpath', '-w', str(script)], text=True).strip()
     command = ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe', '-NoProfile', '-File',
                windows_script]
-    try:
-        run = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        run.check_returncode()
-        return json.loads(run.stdout.lstrip('\ufeff'))
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {}
+    run = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    run.check_returncode()
+    return json.loads(run.stdout.lstrip('\ufeff'))
 
 
 def main(mode):
@@ -107,8 +105,16 @@ def main(mode):
             temporary.replace(path)
 
     cfg = Config(mongo_uri='mongodb://192.168.1.39:27017', db_name=database)
-    store = MongoStore.from_config(cfg)
+    store = None
     process = None
+    save()
+    try:
+        store = MongoStore.from_config(cfg)
+    except BaseException as error:
+        result.update(outcome='failed', error=f'{type(error).__name__}: {error}')
+        result['finished_utc'] = datetime.now(timezone.utc).isoformat()
+        save()
+        raise
     source = WsSource(['ws://127.0.0.1:6006'])
     loop = asyncio.new_event_loop()
 
@@ -173,6 +179,8 @@ def main(mode):
                         assert process.poll() is None, 'Live tail exited during startup'
                         assert time.monotonic() - startup < 90, 'Live tail produced no checkpoint'
                         time.sleep(1)
+                    initial_checkpoint = store.get_checkpoint()
+                    result['initial_checkpoint'] = initial_checkpoint
                     began = time.monotonic()
                     started = datetime.now(timezone.utc)
                     result['started_utc'] = started.isoformat()
@@ -221,6 +229,8 @@ def main(mode):
                     assert process.returncode in (0, 1)
                     process = None
                 result['duration_wall_seconds'] = (datetime.now(timezone.utc) - started).total_seconds()
+                result['checkpoint_progressed'] = store.get_checkpoint() > initial_checkpoint
+                assert result['checkpoint_progressed'], 'Live checkpoint did not progress during the hour'
                 first = store.ledgers.find_one(sort=[('block_number', 1)])['block_number']
                 last = store.highest_ledger()
                 assert last > first and store.count_failed() == 0
