@@ -97,11 +97,14 @@ that do not package 3.12). On macOS it tries Homebrew first, otherwise uv. The u
 installation is per user and does not replace system Python. The installer never
 adds a third-party PPA automatically.
 
-`--yes` accepts installation and backs up an incompatible `.venv` before rebuilding
-it. `--check` only reports what would happen and changes nothing. If installing
+`--yes` accepts installation and preserves the previous `.venv` before replacing it.
+On Linux with Python 3.12 x86_64, a hashed wheel lock is used and packages are installed
+into a candidate environment first; active ingest services block environment replacement.
+`--check` only reports what would happen and changes nothing. If installing
 3.12 is declined or fails, using another Python >= 3.10 requires a separate explicit
 confirmation; unattended runs stop instead of accepting that fallback. An existing
-3.12 `.venv` is reused. Windows also uses `py -3.12` and offers to back up and rebuild
+`.venv` is reused only when its interpreter, lock fingerprint, and `pip check` all match.
+Windows also uses `py -3.12` and offers to back up and rebuild
 an incompatible `.venv`.
 
 For manual commands, see [Create and use the virtual environment](#53-create-and-use-the-virtual-environment).
@@ -148,7 +151,7 @@ What happens:
    - the Python environment `.venv` and its packages;
    - the settings file `.env`, the same settings for both setups; only the database differs (`xrpl_test` / `xrpl_data_collection`). Existing MongoDB settings, including `MONGO_URI_FILE`, are kept. UTF-8/BOM and UTF-16/BOM files are supported; changed files have uniquely named backups. Linux reads the existing node WebSocket port; set `NODE_WS` explicitly to override that endpoint;
    - the test suite and the `doctor` check;
-   - the services `xrpl-tail` and `xrpl-backfill` (installed, not started).
+   - the services `xrpl-tail`, `xrpl-backfill`, `xrpl-recover`, bounded `xrpl-reconcile`, and `xrpl-monitor` (installed, not started).
 5. **`test` only: the real-data checks.** It waits until the node is synced (up to 30 minutes; a new node usually needs 5-20), then runs the same commands you use on the server and reports the result:
    1. `fetch --ledger validated`: the newest ledger is stored;
    2. `backfill` of 200 recent ledgers from your node;
@@ -1401,7 +1404,7 @@ Every command ends with one of these codes. Scripts and services can react to th
 
 ### 6.5 Running tail and backfill at the same time
 
-This is allowed and recommended (run `tail` from day 1 while the backfill fills the history). Each ingestion/reconciliation command takes its own lock file `<base>/xrpl_ingest.<command>.lock`. One `tail`, one `backfill`, one `recover-gaps`, and one `reconcile` can run together, but **not two instances of the same command** (the second one exits with code `5`).
+This is allowed and recommended (run `tail` from day 1 while the backfill fills the history). Each ingestion/reconciliation command takes its own per-host lock file `<base>/xrpl_ingest.<command>.lock`. The live tail additionally claims a MongoDB singleton lease, so only one ordinary tail owner can write across hosts sharing the same configured database. Lease checks fence new writes, checkpoints are monotonic, and ledger upserts are idempotent; MongoDB does not transactionally combine the lease check and each data write, so a paused stale process may finish an in-flight write after takeover. Keep one tail owner until native multi-host pause/partition tests qualify this race. Backfill, recovery, and reconciliation can coexist with the tail; use shared-database credentials/configuration and review concurrent operators carefully.
 Both write the same way (upserts). If both happen to write the same ledger, the result is the same.
 Give each one its own `LOG_FILE` (see [Logs](#67-logs)).
 
@@ -1495,23 +1498,31 @@ The templates are in `deploy/` (Linux: systemd; Windows: Task Scheduler). There 
 
 ### 7.1 Linux: systemd (`deploy/systemd/`)
 
-Two units:
+The installer installs the following units, but enables none automatically:
 
 | Unit | Runs | Installed by setup | Start |
 |---|---|---|---|
-| `xrpl-tail.service` | `python -m xrpl_ingest tail` | yes, not enabled | `sudo systemctl enable --now xrpl-tail` (also starts at every boot) |
-| `xrpl-backfill.service` | `python -m xrpl_ingest backfill` (range from `backfill_range.txt`) | yes, not enabled | `sudo systemctl start xrpl-backfill` (by hand, one run) |
+| `xrpl-tail.service` | `python -m xrpl_ingest tail` (MongoDB singleton lease) | yes, not enabled | `sudo systemctl enable --now xrpl-tail` |
+| `xrpl-backfill.service` | `python -m xrpl_ingest backfill` (range from `backfill_range.txt`) | yes, not enabled | `sudo systemctl start xrpl-backfill` (one run) |
+| `xrpl-recover.service` | Continuous durable gap recovery | yes, not enabled | `sudo systemctl enable --now xrpl-recover` |
+| `xrpl-reconcile.service` / `.timer` | One deep check of a configured bounded range; timer every 15 minutes | yes, timer not enabled | Copy/edit `reconcile_range.txt.example`, then `sudo systemctl enable --now xrpl-reconcile.timer` |
+| `xrpl-monitor.service` / `.timer` | Check failed ingest units and tail health; every minute | yes, timer not enabled | `sudo systemctl enable --now xrpl-monitor.timer` |
 
-`bash install.sh` (`--mode test` or `--mode server`) renders both templates into `/etc/systemd/system/`: it replaces `@REPO_DIR@` (the repo path) and `@USER@` (the selected service account) and runs `daemon-reload`. It refuses to install the units as root, refuses a repo path that contains `%`, `$`, `"`, `\` or a newline, and leaves a differing existing unit untouched.
+`bash install.sh` (`--mode test` or `--mode server`) renders the templates into `/etc/systemd/system/`: it replaces `@REPO_DIR@` (the repo path) and `@USER@` (the selected service account) and runs `daemon-reload`. It refuses to install the units as root, refuses a repo path that contains `%`, `$`, `"`, `\` or a newline, and leaves a differing existing unit untouched.
 
 ```bash
 sudo systemctl enable --now xrpl-tail
 sudo systemctl start xrpl-backfill
-systemctl status xrpl-tail xrpl-backfill
-journalctl -u xrpl-tail -f          # or: journalctl -u xrpl-backfill -f
+sudo systemctl enable --now xrpl-recover xrpl-monitor.timer
+cp reconcile_range.txt.example reconcile_range.txt  # edit both inclusive bounds first
+sudo systemctl enable --now xrpl-reconcile.timer
+systemctl status xrpl-tail xrpl-backfill xrpl-recover xrpl-monitor.timer
+journalctl -u xrpl-tail -f          # or: journalctl -u xrpl-recover -f
 ```
 
-Do not install a rendered unit over an existing unit without reviewing the diff. The installer checks both rendered units before changing either one.
+The monitor records its errors in the system journal; no external alert route is installed. Reconciliation stores its last bounded coverage record in Mongo metadata and will not mark it verified unless the source covers the complete configured interval. The singleton tail lease and write guards have unit tests only; lease-check/write races and reboot behavior are not natively qualified.
+
+Do not install a rendered unit over an existing unit without reviewing the diff. The installer checks the rendered unit set before changing any one of them.
 
 ```bash
 tmp=$(mktemp)

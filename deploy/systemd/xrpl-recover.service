@@ -1,0 +1,42 @@
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST.
+# Installed by install.sh; enable after reviewing recovery-job behavior:
+#   sudo systemctl enable --now xrpl-recover
+# Stop gracefully with systemctl stop or recover-gaps=0 in process_status.txt.
+
+[Unit]
+Description=XRPL ingest: durable historical gap recovery
+Wants=network-online.target
+After=network-online.target mongod.service xrpld.service
+StartLimitIntervalSec=1min
+StartLimitBurst=5
+
+[Service]
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStartPre="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest doctor --mongo --node
+ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest recover-gaps --poll-interval 30
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=1 2 3 5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStopSec=300
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

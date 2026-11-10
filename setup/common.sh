@@ -156,10 +156,15 @@ pick_python() {
   echo "Python for .venv: $PYTHON ($v)"
 }
 
-# make_venv: create $REPO_DIR/.venv with $PYTHON (pick_python first) and install requirements.txt.
+# make_venv: build and validate a replacement environment before switching $REPO_DIR/.venv.
 make_venv() {
-  local venv="$REPO_DIR/.venv" v wanted backup activated
+  local venv="$REPO_DIR/.venv" v wanted backup activated requirements candidate stamp want
   wanted="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  requirements="$REPO_DIR/requirements.txt"
+  if [ "$(uname -s)" = Linux ] && [ "$wanted" = 3.12 ]; then
+    requirements="$REPO_DIR/requirements-linux-py312-x86_64.lock"
+  fi
+  [ -f "$requirements" ] || die "dependency lock/file not found: $requirements"
   if [ -e "$venv" ] || [ -L "$venv" ]; then
     v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
     activated="$venv"
@@ -170,29 +175,51 @@ make_venv() {
       warn "Existing $venv uses Python $v; selected Python $wanted."
       [ "$activated" -ef "$venv" ] || warn ".venv was copied or moved from $activated; its launchers need rebuilding."
       ask "Back up .venv and recreate it with Python $wanted?" Y || die "Existing .venv left unchanged; cannot continue with an incompatible environment"
-      backup="$(mktemp -d "$REPO_DIR/.venv-backup.XXXXXX")"
-      mv "$venv" "$backup/.venv" || die "could not back up .venv to $backup"
-      say "Previous .venv saved in $backup/.venv (move it back before using it)"
     else
       say "Using existing $venv (Python $v)"
     fi
   fi
-  if [ ! -x "$venv/bin/python" ]; then
-    say "Creating $venv with $PYTHON"
-    "$PYTHON" -m venv "$venv" || die "venv creation failed; install the venv package: sudo apt-get install $(basename "$PYTHON")-venv"
-  fi
-  v="$("$venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-  [ "$v" = "$wanted" ] || die "$venv uses Python $v instead of $wanted"
-  # Skip pip when requirements.txt has not changed since the last successful install.
-  local stamp="$venv/.requirements.sha256" want
-  want="$("$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$REPO_DIR/requirements.txt")"
+  stamp="$venv/.requirements.sha256"
+  want="$("$PYTHON" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$requirements")"
   if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && "$venv/bin/python" -m pip check >/dev/null 2>&1; then
     say "Python packages already installed (requirements.txt unchanged)"
     return 0
   fi
-  "$venv/bin/python" -m pip install -q --upgrade pip
-  "$venv/bin/python" -m pip install -q -r "$REPO_DIR/requirements.txt"
-  printf '%s\n' "$want" >"$stamp"
+  if [ "$(uname -s)" = Linux ] && has_systemd; then
+    local unit
+    for unit in xrpl-tail.service xrpl-backfill.service xrpl-recover.service xrpl-reconcile.service xrpl-reconcile.timer xrpl-monitor.service xrpl-monitor.timer; do
+      if $SUDO systemctl is-active --quiet "$unit"; then
+        die "$unit is active; stop ingest services before replacing the Python environment"
+      fi
+    done
+  fi
+  candidate="$(mktemp -d "$REPO_DIR/.venv-candidate.XXXXXX")"
+  say "Building a replacement Python environment in $candidate"
+  if ! "$PYTHON" -m venv "$candidate"; then
+    rm -rf -- "$candidate"
+    die "venv creation failed; install the venv package: sudo apt-get install $(basename "$PYTHON")-venv"
+  fi
+  if ! "$candidate/bin/python" -m pip install -q --only-binary=:all: --require-hashes -r "$requirements" ||
+     ! "$candidate/bin/python" -m pip check; then
+    rm -rf -- "$candidate"
+    die "dependency installation/check failed; the active .venv was not changed"
+  fi
+  printf '%s\n' "$want" >"$candidate/.requirements.sha256"
+  if [ -e "$venv" ] || [ -L "$venv" ]; then
+    backup="$(mktemp -d "$REPO_DIR/.venv-backup.XXXXXX")"
+    if ! mv -- "$venv" "$backup/.venv"; then
+      rm -rf -- "$candidate" "$backup"
+      die "could not back up the active .venv; it was not replaced"
+    fi
+  fi
+  if ! mv -- "$candidate" "$venv"; then
+    if [ -n "${backup:-}" ]; then mv -- "$backup/.venv" "$venv" || die "replacement failed and backup restore failed: $backup/.venv"; fi
+    rm -rf -- "$candidate"
+    die "could not activate the replacement .venv"
+  fi
+  if [ -n "${backup:-}" ]; then
+    say "Previous environment preserved at $backup/.venv for rollback"
+  fi
 }
 
 # print_key_fprs FILE: primary-key fingerprint of every key in FILE, one per line.
@@ -401,7 +428,7 @@ unit_value_problem() {
   esac
 }
 
-# install_ingest_units USER: render deploy/systemd/xrpl-{tail,backfill}.service with REPO_DIR
+# install_ingest_units USER: render deploy/systemd templates with REPO_DIR
 # and USER into /etc/systemd/system and daemon-reload. Enables neither. Returns 1 (after a
 # warning) if the units cannot be installed safely.
 install_ingest_units() {
@@ -423,9 +450,10 @@ install_ingest_units() {
   [ -z "$why" ] || { warn "not installing the xrpl-* units: repo path '$REPO_DIR' $why; move the repo to a plain path"; return 1; }
   esc_repo="$(sed_escape_repl "$REPO_DIR")"
   esc_user="$(sed_escape_repl "$user")"
-  for name in xrpl-tail xrpl-backfill; do
-    src="$REPO_DIR/deploy/systemd/$name.service"
-    dst="/etc/systemd/system/$name.service"
+  for name in xrpl-tail.service xrpl-backfill.service xrpl-recover.service \
+      xrpl-reconcile.service xrpl-reconcile.timer xrpl-monitor.service xrpl-monitor.timer; do
+    src="$REPO_DIR/deploy/systemd/$name"
+    dst="/etc/systemd/system/$name"
     [ -f "$src" ] || die "missing unit template $src"
     tmp="$(mktemp)"
     # Substitute on directive lines only; the template's comments keep naming the placeholders.
@@ -476,7 +504,11 @@ EOF
     cat <<'EOF'
        sudo systemctl enable --now xrpl-tail     # keeps following new ledgers, restarts on failure
        sudo systemctl start xrpl-backfill        # one run over backfill_range.txt (not enabled at boot)
-       journalctl -u xrpl-tail -f   /   journalctl -u xrpl-backfill -f
+       sudo systemctl enable --now xrpl-recover  # processes persisted gap jobs continuously
+       sudo systemctl enable --now xrpl-monitor.timer
+       cp reconcile_range.txt.example reconcile_range.txt  # edit both inclusive bounds first
+       sudo systemctl enable --now xrpl-reconcile.timer
+       journalctl -u xrpl-tail -f   /   journalctl -u xrpl-recover -f
 EOF
   else
     cat <<'EOF'

@@ -8,12 +8,43 @@ import uuid
 from typing import Any, Callable, Optional
 
 from .backfill import ChunkResult, discover_node, process_chunk
+from .errors import StopRequested
 from .fetcher import RetryPolicy, Sleep
 from .ledger_ranges import intersect, subtract
 from .repair import repair_range
 
 log = logging.getLogger(__name__)
 LEASE_SECONDS = 300
+
+
+class _FencedStore:
+    """Reject recovery-worker writes after their database lease has been superseded."""
+
+    _WRITE_METHODS = {
+        "clear_failure", "mark_ledgers_verified", "record_failure",
+        "record_ledger_attempt", "save_ledger_bundle", "save_ledger_bundles",
+        "schedule_recovery_range",
+    }
+
+    def __init__(self, store: Any, job_id: str, token: int,
+                 lease_lost: Callable[[], None]):
+        self._store = store
+        self._job_id = job_id
+        self._token = token
+        self._lease_lost = lease_lost
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self._store, name)
+        if name not in self._WRITE_METHODS:
+            return method
+
+        def fenced_write(*args: Any, **kwargs: Any) -> Any:
+            if not self._store.recovery_lease_valid(self._job_id, self._token):
+                self._lease_lost()
+                raise StopRequested("recovery lease was lost before a database write")
+            return method(*args, **kwargs)
+
+        return fenced_write
 
 
 async def recover_jobs(source: Any, store: Any, retry: RetryPolicy, *, chunk_size: int,
@@ -37,11 +68,18 @@ async def recover_jobs(source: Any, store: Any, retry: RetryPolicy, *, chunk_siz
         retry_delay = min(3600, retry.delay(min(job.get("attempts", 1), 12)))
         status = "pending"
         reason: Optional[str] = None
+        verification: Optional[dict] = None
         lease_lost = False
         heartbeat_done = asyncio.Event()
 
         def should_stop() -> bool:
             return stop_check() or lease_lost
+
+        def note_lease_lost() -> None:
+            nonlocal lease_lost
+            lease_lost = True
+
+        fenced_store = _FencedStore(store, job_id, token, note_lease_lost)
 
         async def heartbeat() -> None:
             nonlocal lease_lost
@@ -80,7 +118,7 @@ async def recover_jobs(source: Any, store: Any, retry: RetryPolicy, *, chunk_siz
                             break
                         hi = min(b, lo + chunk_size - 1)
                         result: ChunkResult = await process_chunk(
-                            source, store, (lo, hi), concurrency=1, retry=retry,
+                            source, fenced_store, (lo, hi), concurrency=1, retry=retry,
                             stop_check=should_stop, sleep=sleep)
                         failed = failed or result.failed > 0 or result.unrecorded > 0
                         stopped = stopped or not result.completed
@@ -94,16 +132,20 @@ async def recover_jobs(source: Any, store: Any, retry: RetryPolicy, *, chunk_siz
                     verified = []
                     for a, b in available:
                         verified.append(await repair_range(
-                            source, store, a, b, node_ranges, retry=retry, concurrency=1,
+                            source, fenced_store, a, b, node_ranges, retry=retry, concurrency=1,
                             stop_check=should_stop, repair=False, deep=True, sleep=sleep))
                     if missing:
                         status = "blocked"
                         reason = "source complete_ledgers does not include the full range"
-                    elif any(not result.ok for result in verified):
+                    elif any(not result.ok or not result.node_checked for result in verified):
                         remaining = sum(result.remaining for result in verified)
                         reason = f"deep verification found {remaining} unresolved issue(s)"
                     else:
                         status = "verified"
+                        verification = {
+                            "start": start, "end": end, "checked_ranges": available,
+                            "node_checked": True, "remaining": 0, "stopped": False,
+                        }
         except Exception as e:
             reason = f"{type(e).__name__}: {e}"
             log.exception("recovery job %s failed", job_id)
@@ -126,7 +168,7 @@ async def recover_jobs(source: Any, store: Any, retry: RetryPolicy, *, chunk_siz
             delay = 0
         updated = await asyncio.to_thread(
             store.finish_recovery_job, job_id, token, status, reason=reason,
-            retry_after_seconds=delay)
+            retry_after_seconds=delay, verification=verification)
         if not updated:
             log.warning("recovery job %s lease was superseded before completion", job_id)
         else:

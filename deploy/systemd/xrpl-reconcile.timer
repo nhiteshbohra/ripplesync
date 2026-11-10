@@ -1,0 +1,15 @@
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST.
+# Enable only after reconcile_range.txt contains a reviewed inclusive start/end range.
+
+[Unit]
+Description=Schedule bounded XRPL reconciliation
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=xrpl-reconcile.service
+
+[Install]
+WantedBy=timers.target

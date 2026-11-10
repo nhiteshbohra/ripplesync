@@ -1,0 +1,36 @@
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST.
+# Configure reconcile_range.txt before enabling xrpl-reconcile.timer.
+
+[Unit]
+Description=XRPL ingest: bounded deep reconciliation
+Wants=network-online.target
+After=network-online.target mongod.service xrpld.service
+StartLimitIntervalSec=1min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStartPre="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest doctor --mongo --node
+ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest reconcile --range-file "@REPO_DIR@/reconcile_range.txt" --once
+Restart=on-failure
+RestartSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=6h

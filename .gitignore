@@ -14,11 +14,15 @@ __pycache__/
 *.log
 logs/
 *.lock
+!requirements-linux-py312-x86_64.lock
 process_status.txt
 backfill_range.txt
+reconcile_range.txt
 
 # Local virtual environments
 .venv/
+/.venv-candidate.*/
+/.venv-backup.*/
 venv/
 env/
 ENV/

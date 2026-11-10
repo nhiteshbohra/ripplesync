@@ -1,0 +1,14 @@
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST.
+
+[Unit]
+Description=Schedule XRPL ingest service and checkpoint monitoring
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=xrpl-monitor.service
+
+[Install]
+WantedBy=timers.target

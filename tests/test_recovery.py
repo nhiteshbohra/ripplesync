@@ -1,11 +1,11 @@
 import asyncio
 
 from conftest import FAST_RETRY, FakeSource, no_sleep
-from xrpl_ingest.errors import ConnectFailed
+from xrpl_ingest.errors import ConnectFailed, StopRequested
 from pymongo.errors import AutoReconnect
 import pytest
 
-from xrpl_ingest.recovery import recover_jobs
+from xrpl_ingest.recovery import _FencedStore, recover_jobs
 
 
 def run(coro):
@@ -89,6 +89,21 @@ def test_recovery_worker_surfaces_mongodb_unavailability():
         run(recover_jobs(
             FakeSource(), UnavailableStore(), FAST_RETRY, chunk_size=2,
             stop_check=lambda: False, once=True, sleep=no_sleep))
+
+
+def test_stale_recovery_fence_rejects_database_writes(store):
+    job_id = store.schedule_recovery_range(5, 5, "fencing test")
+    claimed = store.claim_recovery_job("worker-a")
+    store.meta.update_one({"_id": job_id}, {"$inc": {"fencing_token": 1}})
+    lost = []
+    fenced = _FencedStore(store, job_id, claimed["fencing_token"],
+                          lambda: lost.append(True))
+
+    with pytest.raises(StopRequested, match="lease was lost"):
+        fenced.record_ledger_attempt(5)
+
+    assert lost == [True]
+    assert store.ledger_progress(5, 5)["attempted"] == 0
 
 
 def test_transient_source_errors_remain_pending_after_many_attempts(store):

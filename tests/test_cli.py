@@ -54,7 +54,8 @@ def test_backfill_help_documents_exit_codes():
 def test_main_help_lists_every_exit_code_as_a_table():
     text = build_parser().format_help()
     for line in ("  0    ok", "  1    ", "  2    config", "  3    backfill", "  4    node or MongoDB",
-                 "  5    another instance", "  6    unexpected internal error", "  130  interrupted"):
+                 "  5    another local instance", "  6    unexpected internal error",
+                 "  130  interrupted"):
         assert line in text, line
     assert "current_process=0" in text and "retry-failed" in text  # stop keys documented
 
@@ -530,3 +531,50 @@ def test_verify_rejects_reversed_range(store, capsys):
 def test_verify_reports_missing_ledgers(store, capsys):
     assert _verify(store, 100, 102) == 1
     assert "missing ledgers 100-102" in capsys.readouterr().out
+
+
+def test_reconcile_persists_bounded_verified_coverage(cli_main, monkeypatch, store):
+    from types import SimpleNamespace
+
+    from xrpl_ingest import repair
+
+    source = FakeSource(ranges="32570-32572")
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: source)
+
+    async def clean_reconciliation(*args, **kwargs):
+        return SimpleNamespace(remaining=0, node_checked=True, stopped=False)
+
+    monkeypatch.setattr(repair, "repair_range", clean_reconciliation)
+    assert cli_main(["reconcile", "--start", "32570", "--end", "32572", "--once"]) == 0
+    record = store.meta.find_one({"_id": "reconciliation_range:32570-32572"})
+    assert record["status"] == "verified"
+    assert record["checked_ranges"] == [[32570, 32572]]
+    assert record["coverage_complete"] is True
+
+
+def test_reconcile_does_not_report_success_for_unavailable_source_range(
+        cli_main, monkeypatch, store):
+    from types import SimpleNamespace
+
+    from xrpl_ingest import repair
+
+    source = FakeSource(ranges="32571-32572")
+    monkeypatch.setattr(cli.WsSource, "from_config", lambda _cfg, **kw: source)
+
+    async def clean_reconciliation(*args, **kwargs):
+        return SimpleNamespace(remaining=0, node_checked=True, stopped=False)
+
+    monkeypatch.setattr(repair, "repair_range", clean_reconciliation)
+    assert cli_main(["reconcile", "--start", "32570", "--end", "32572", "--once"]) == 1
+    record = store.meta.find_one({"_id": "reconciliation_range:32570-32572"})
+    assert record["status"] == "incomplete"
+    assert record["uncovered_ranges"] == [[32570, 32570]]
+
+
+def test_reconcile_requires_explicit_bounded_range(cli_main):
+    assert cli_main(["reconcile", "--once"]) == 2
+
+
+def test_tail_exits_locked_when_another_host_holds_database_lease(cli_main, store):
+    assert store.claim_tail_lease("remote-host") is not None
+    assert cli_main(["tail"]) == cli.EXIT_LOCKED

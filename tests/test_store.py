@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from conftest import NOW, make_result
@@ -243,4 +245,57 @@ def test_source_verification_advances_only_verified_progress(store):
     store.mark_ledgers_verified(100, 100)
     after = store.ledger_progress(100, 100)
     assert after["verified_contiguous"] == 1
-    assert store.recovery_jobs(status="verified")[0]["start"] == 100
+    assert store.recovery_jobs(status="verified") == []
+    assert store.recovery_jobs(status="pending")[0]["start"] == 100
+
+
+def test_recovery_job_cannot_be_marked_verified_without_full_node_evidence(store):
+    job_id = store.schedule_recovery_range(120, 122, "verification pending")
+    claimed = store.claim_recovery_job("worker")
+
+    with pytest.raises(ValueError, match="requires verification evidence"):
+        store.finish_recovery_job(job_id, claimed["fencing_token"], "verified")
+
+    with pytest.raises(ValueError, match="covering the complete job range"):
+        store.finish_recovery_job(
+            job_id, claimed["fencing_token"], "verified",
+            verification={
+                "start": 120, "end": 122, "checked_ranges": [(121, 122)],
+                "node_checked": True, "remaining": 0, "stopped": False,
+            })
+
+    assert store.recovery_jobs(status="running")[0]["start"] == 120
+
+
+def test_reconciliation_records_exact_bounded_source_coverage(store):
+    partial = store.record_reconciliation_pass(
+        200, 209, source_ranges=[(203, 209)], checked_ranges=[(203, 209)],
+        remaining=0, node_checked=True)
+    assert partial["status"] == "incomplete"
+    assert partial["uncovered_ranges"] == [[200, 202]]
+    assert partial["coverage_complete"] is False
+
+    verified = store.record_reconciliation_pass(
+        200, 209, source_ranges=[(200, 204), (207, 220)],
+        checked_ranges=[(200, 204), (205, 209)], remaining=0, node_checked=True)
+    assert verified["status"] == "verified"
+    assert verified["coverage_complete"] is True
+    assert verified["uncovered_ranges"] == []
+    stored = store.meta.find_one({"_id": "reconciliation_range:200-209"})
+    persisted_at = stored["last_checked_at"].replace(tzinfo=timezone.utc)
+    assert abs((persisted_at - verified["last_checked_at"]).total_seconds()) < 0.001
+
+
+def test_tail_lease_has_one_owner_and_rejects_stale_fencing_tokens(store):
+    now = datetime.now(timezone.utc)
+    token_a = store.claim_tail_lease("host-a", now=now, lease_seconds=300)
+    assert token_a == 1
+    assert store.claim_tail_lease("host-b", now=now + timedelta(seconds=1)) is None
+    assert store.renew_tail_lease("host-a", token_a, now=now + timedelta(seconds=200))
+
+    token_b = store.claim_tail_lease(
+        "host-b", now=now + timedelta(seconds=501), lease_seconds=300)
+    assert token_b == 2
+    assert not store.tail_lease_valid("host-a", token_a, now=now + timedelta(seconds=502))
+    assert store.tail_lease_valid("host-b", token_b, now=now + timedelta(seconds=502))
+    assert not store.release_tail_lease("host-a", token_a, now=now + timedelta(seconds=503))

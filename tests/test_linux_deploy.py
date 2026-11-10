@@ -43,6 +43,43 @@ def test_tail_retries_failures_but_has_bounded_restart_rate():
     assert "StartLimitBurst=5" in text
 
 
+def test_recovery_service_runs_durable_worker_with_restart_bounds():
+    text = (UNIT_DIR / "xrpl-recover.service").read_text(encoding="utf-8")
+    assert 'ExecStart="@REPO_DIR@/.venv/bin/python" -m xrpl_ingest recover-gaps --poll-interval 30' in text
+    assert "Restart=on-failure" in text
+    assert "RestartPreventExitStatus=1 2 3 5" in text
+    assert "StartLimitBurst=5" in text
+    assert "User=@USER@" in text and "ProtectSystem=full" in text
+
+
+def test_scheduled_reconciliation_is_bounded_and_persistent():
+    service = (UNIT_DIR / "xrpl-reconcile.service").read_text(encoding="utf-8")
+    timer = (UNIT_DIR / "xrpl-reconcile.timer").read_text(encoding="utf-8")
+    assert "--range-file \"@REPO_DIR@/reconcile_range.txt\" --once" in service
+    assert "OnUnitActiveSec=15min" in timer
+    assert "Persistent=true" in timer
+
+
+def test_monitor_timer_checks_systemd_state_and_tail_health():
+    service = (UNIT_DIR / "xrpl-monitor.service").read_text(encoding="utf-8")
+    timer = (UNIT_DIR / "xrpl-monitor.timer").read_text(encoding="utf-8")
+    monitor = (ROOT / "setup" / "monitor_services.sh").read_text(encoding="utf-8")
+    assert "OnUnitActiveSec=1min" in timer
+    assert "systemctl is-failed --quiet" in monitor
+    assert "xrpl_ingest health" in monitor
+    assert "setup/monitor_services.sh" in service
+
+
+def test_linux_environment_uses_exact_dependency_versions_and_stages_replacement():
+    lock = (ROOT / "requirements-linux-py312-x86_64.lock").read_text(encoding="utf-8")
+    common = (ROOT / "setup" / "common.sh").read_text(encoding="utf-8")
+    assert "pymongo==4.10.1" in lock
+    assert "websockets==17.4" in lock
+    assert "requirements-linux-py312-x86_64.lock" in common
+    assert "venv-candidate" in common
+    assert "Previous environment preserved" in common
+
+
 @pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
                     reason="requires native Linux Bash; Windows/WSL is development-only")
 def test_shell_config_installer_refuses_to_replace_operator_file():

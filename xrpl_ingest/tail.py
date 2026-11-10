@@ -3,17 +3,47 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 from pymongo.errors import PyMongoError
 
 from .config import redact_url
-from .errors import RpcError, TransientError
+from .errors import RpcError, StopRequested, TransientError
 from .fetcher import RetryPolicy, Sleep, ingest_ledger
 
 log = logging.getLogger(__name__)
 
 BIG_GAP = 1000  # ledgers behind before we suggest a backfill
+
+
+class _FencedTailStore:
+    """Prevent stale tail workers from beginning new database writes."""
+
+    _WRITE_METHODS = {
+        "clear_failure", "record_failure", "record_ledger_attempt",
+        "save_ledger_bundle", "save_ledger_bundles", "schedule_recovery_range",
+        "set_checkpoint",
+    }
+
+    def __init__(self, store: Any, worker_id: str, token: int,
+                 lease_lost: Callable[[], None]):
+        self._store = store
+        self._worker_id = worker_id
+        self._token = token
+        self._lease_lost = lease_lost
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self._store, name)
+        if name not in self._WRITE_METHODS:
+            return method
+
+        def fenced_write(*args: Any, **kwargs: Any) -> Any:
+            if not self._store.tail_lease_valid(self._worker_id, self._token):
+                self._lease_lost()
+                raise StopRequested("live-tail lease was lost before a database write")
+            return method(*args, **kwargs)
+
+        return fenced_write
 
 
 def start_after(highest_stored: int, latest: int) -> int:
@@ -26,7 +56,8 @@ def start_after(highest_stored: int, latest: int) -> int:
 
 async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: float,
                stop_check: Callable[[], bool], sleep: Sleep = asyncio.sleep,
-               max_iterations: Optional[int] = None) -> int:
+               max_iterations: Optional[int] = None,
+               owner: Optional[Tuple[str, int, Callable[[], None]]] = None) -> int:
     """Run until stop_check() is true (or max_iterations, for tests). Returns last checkpoint.
 
     A ledger that fails all retries is recorded in the failed collection and the checkpoint
@@ -38,6 +69,8 @@ async def tail(source: Any, store: Any, retry: RetryPolicy, *, poll_interval: fl
     backfill ended) if that is at most BIG_GAP behind; further behind, or on an empty
     database, it starts at the node's current ledger and logs the backfill for the hole.
     """
+    if owner is not None:
+        store = _FencedTailStore(store, owner[0], owner[1], owner[2])
     last = await asyncio.to_thread(store.get_checkpoint)
     highest = await asyncio.to_thread(store.highest_ledger)
     if last > highest:

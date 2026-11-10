@@ -10,16 +10,16 @@ No production MongoDB was accessed or modified. The MongoDB integration run belo
 
 | Test | Result | Environment / evidence |
 |---|---|---|
-| Full pytest suite after hardening changes | **PASS** — 923 passed, 11 skipped, 56.04s | Windows CPython 3.12; `python -m pytest -q`. This includes the new config-safety and systemd-template tests. |
-| Isolated MongoDB integration suite | **PASS** — 3 passed, 7.30s | Windows, local MongoDB and fake XRPL node; `python -m pytest -m integration -q tests/test_integration.py`. Database name generated with `xrpl_ingest_test_` prefix and removed by the fixture. |
-| Bash syntax and safe-file helper | **PASS (development-only)** — exit 0 | Invoked through the Windows Bash/WSL shim for `bash -n` on Linux shell files and `tests/test_linux_install_safety.sh`. WSL emitted a virtualization warning. This is not a native Linux or systemd result. |
-| Pylance syntax validation | **PASS** | No syntax errors in `setup/edit_cfg.py` or `setup/xrpld_check.py`. |
-| Pylance diagnostics | **PASS** | No diagnostics for `setup/edit_cfg.py`. |
-| Whitespace validation | **PASS** | `git diff --check` returned exit 0; Git noted a pre-existing CRLF normalization warning for `FINAL_QA_REPORT.md`. |
+| Full pytest suite, integration disabled | **PASS** — 936 passed, 15 skipped, 50.70s | Windows CPython 3.12; `XRPL_INGEST_NO_INTEGRATION=1 python -m pytest -q`. Includes recovery fencing, tail ownership, bounded reconciliation coverage, deployment, and installer tests. No MongoDB was accessed by this run. |
+| Isolated MongoDB integration suite (prior evidence) | **PASS** — 3 passed, 7.30s | Windows, local MongoDB and fake XRPL node; `python -m pytest -m integration -q tests/test_integration.py`. Database name generated with `xrpl_ingest_test_` prefix and removed by the fixture. This is not native Linux evidence and does not use a production database. |
+| Installer shell self-check | **PASS (development-only)** | `bash tests/check_python.sh` exited 0 through the Windows Bash/WSL shim. The script runs `bash -n` over installer scripts and mocked installer/venv/rollback checks. WSL emitted a virtualization warning; this is not a native Linux or systemd result. |
+| Pylance diagnostics | **PASS** | No diagnostics for the changed `cli.py`, `store.py`, `tail.py`, or `recovery.py`. |
+| Linux wheel lock resolution | **PASS (artifact check only)** | `pip download --require-hashes` resolved and validated all 13 pinned wheels for CPython 3.12 x86_64 using `manylinux_2_17_x86_64`. This does not verify installation or runtime behavior on Linux. |
+| Whitespace validation | **PASS** | `git diff --check` returned exit 0. |
 
 ### Iteration record
 
-The first full-suite run after adding the config guard found one failing test: the repeated-edit backup test invoked the XRPL config editor without its new explicit overwrite opt-in. The test was corrected to exercise the intentional overwrite path; the final full-suite run passed. No production code was weakened to make that test pass.
+The latest complete no-integration run includes the reliability and deployment changes recorded in this report. Native Linux-specific behavior remains unverified; see the mandatory tests below.
 
 ## Mandatory native Linux tests
 
@@ -38,6 +38,7 @@ The first full-suite run after adding the config guard found one failing test: t
 | Missing historical ledger recovery | **NOT RUN in this Linux task** | Existing bounded reliability tests are not native Linux evidence. |
 | Simultaneous live and historical ingestion | **NOT RUN natively** | Prior unit coverage is not a Linux service/system test. |
 | Multi-server contention | **NOT RUN** | No multi-host Linux environment. |
+| Bounded real-mainnet ingestion, interruption, recovery, and reconciliation | **NOT RUN** | No native Linux XRPL+Mongo test environment; no production database was used. |
 | 24-hour endurance | **NOT RUN** | No native Linux runner. |
 | 72-hour endurance | **NOT RUN** | No native Linux runner. |
 
@@ -45,8 +46,11 @@ The first full-suite run after adding the config guard found one failing test: t
 
 - The Windows pytest suite proves regression behavior on Windows only.
 - The integration suite uses a fake XRPL node and does not validate network peer behavior or systemd.
-- The Bash helper checks one safe-install function, not package-manager semantics, permissions across a real filesystem, or rollback.
-- The current dependency lock is Windows-specific.
+- The shell self-check uses mocked interpreters and command outputs; it does not validate package-manager semantics, real filesystem permissions, or native rollback.
+- The new dependency lock targets CPython 3.12 x86_64 Linux wheels, but has only been resolved and hash-checked from Windows; native installation is unverified.
 - No bounded real XRPL backfill/deep verification, interruption run, or sustained live-ingestion run was executed as part of this Linux hardening increment.
+- The Linux-only systemd units have not been validated with `systemd-analyze verify` or exercised by a native systemd manager.
+- Tail ownership uses a MongoDB singleton lease and recovery writes are fenced, but lease checking and subsequent multi-collection writes are not atomic; strict exclusion of an already-started stale-worker write is not proven. Backfill is not globally single-owner.
+- Service monitoring reports failed units and stalled checkpoints to journald only; external alert delivery is not configured.
 
 Production status remains **No-Go**. See [`PRODUCTION_READINESS.md`](./PRODUCTION_READINESS.md).

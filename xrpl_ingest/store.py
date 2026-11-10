@@ -7,9 +7,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pymongo import (ASCENDING, DESCENDING, MongoClient, ReturnDocument, ReplaceOne,
                      UpdateOne)
+from pymongo.errors import DuplicateKeyError
 
 from .config import Config
 from .errors import ConfigError
+from .ledger_ranges import subtract
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +19,8 @@ LAST_LEDGER_ID = "last_processed_ledger"
 CHUNK_KIND = "backfill_chunk"
 RECOVERY_KIND = "recovery_range"
 LEDGER_PROGRESS_KIND = "ledger_progress"
+TAIL_OWNER_ID = "live_tail_owner"
+TAIL_LEASE_SECONDS = 300
 
 
 def _now() -> datetime:
@@ -294,9 +298,32 @@ class MongoStore:
 
     def finish_recovery_job(self, job_id: str, fencing_token: int, status: str, *,
                             reason: Optional[str] = None,
-                            retry_after_seconds: float = 0) -> bool:
+                            retry_after_seconds: float = 0,
+                            verification: Optional[Dict[str, Any]] = None) -> bool:
         if status not in {"pending", "blocked", "ingested", "verified"}:
             raise ValueError(f"invalid recovery status: {status}")
+        if status == "verified":
+            job = self.meta.find_one(
+                {"_id": job_id, "kind": RECOVERY_KIND, "status": "running",
+                 "fencing_token": fencing_token},
+                {"start": 1, "end": 1},
+            )
+            if not job:
+                return False
+            if not verification:
+                raise ValueError("verified recovery requires verification evidence")
+            start, end = job["start"], job["end"]
+            checked = verification.get("checked_ranges", [])
+            try:
+                uncovered = subtract(start, end, checked)
+            except (TypeError, ValueError):
+                uncovered = [(start, end)]
+            if (verification.get("start") != start or verification.get("end") != end
+                    or verification.get("node_checked") is not True
+                    or verification.get("remaining") != 0
+                    or verification.get("stopped") is not False or uncovered):
+                raise ValueError(
+                    "verified recovery requires deep node checks covering the complete job range")
         now = _now()
         update = {"$set": {"status": status, "updated_at": now,
                            "next_attempt_at": now + timedelta(
@@ -310,6 +337,73 @@ class MongoStore:
             {"_id": job_id, "kind": RECOVERY_KIND, "status": "running",
              "fencing_token": fencing_token},
             update,
+        )
+        return result.modified_count == 1
+
+    def recovery_lease_valid(self, job_id: str, fencing_token: int, *,
+                             now: Optional[datetime] = None) -> bool:
+        now = now or _now()
+        return self.meta.find_one(
+            {"_id": job_id, "kind": RECOVERY_KIND, "status": "running",
+             "fencing_token": fencing_token, "lease_until": {"$gt": now}},
+            {"_id": 1},
+        ) is not None
+
+    def claim_tail_lease(self, worker_id: str, *, now: Optional[datetime] = None,
+                         lease_seconds: int = 300) -> Optional[int]:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be >= 1")
+        now = now or _now()
+        try:
+            self.meta.update_one(
+                {"_id": TAIL_OWNER_ID},
+                {"$setOnInsert": {"kind": "tail_owner", "lease_until": now}},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            pass
+        job = self.meta.find_one_and_update(
+            {"_id": TAIL_OWNER_ID, "kind": "tail_owner",
+             "lease_until": {"$lte": now}},
+            {"$set": {"worker_id": worker_id,
+                      "lease_until": now + timedelta(seconds=lease_seconds),
+                      "updated_at": now},
+             "$inc": {"fencing_token": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return job.get("fencing_token") if job else None
+
+    def renew_tail_lease(self, worker_id: str, fencing_token: int, *,
+                         now: Optional[datetime] = None,
+                         lease_seconds: int = 300) -> bool:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be >= 1")
+        now = now or _now()
+        result = self.meta.update_one(
+            {"_id": TAIL_OWNER_ID, "kind": "tail_owner", "worker_id": worker_id,
+             "fencing_token": fencing_token, "lease_until": {"$gt": now}},
+            {"$set": {"lease_until": now + timedelta(seconds=lease_seconds),
+                      "updated_at": now}},
+        )
+        return result.matched_count == 1
+
+    def tail_lease_valid(self, worker_id: str, fencing_token: int, *,
+                         now: Optional[datetime] = None) -> bool:
+        now = now or _now()
+        return self.meta.find_one(
+            {"_id": TAIL_OWNER_ID, "kind": "tail_owner", "worker_id": worker_id,
+             "fencing_token": fencing_token, "lease_until": {"$gt": now}},
+            {"_id": 1},
+        ) is not None
+
+    def release_tail_lease(self, worker_id: str, fencing_token: int, *,
+                           now: Optional[datetime] = None) -> bool:
+        now = now or _now()
+        result = self.meta.update_one(
+            {"_id": TAIL_OWNER_ID, "kind": "tail_owner", "worker_id": worker_id,
+             "fencing_token": fencing_token},
+            {"$set": {"lease_until": now, "updated_at": now},
+             "$unset": {"worker_id": ""}},
         )
         return result.modified_count == 1
 
@@ -333,12 +427,43 @@ class MongoStore:
              "status": "ingested"},
             {"$set": {"verified": True, "verified_at": _now(), "updated_at": _now()}},
         )
-        self.meta.update_many(
-            {"kind": RECOVERY_KIND, "start": {"$gte": start}, "end": {"$lte": end},
-             "status": {"$ne": "running"}},
-            {"$set": {"status": "verified", "verified_at": _now(), "updated_at": _now()},
-             "$unset": {"reason": "", "worker_id": "", "lease_until": ""}},
+
+    def record_reconciliation_pass(self, start: int, end: int, *,
+                                   source_ranges: List[Tuple[int, int]],
+                                   checked_ranges: List[Tuple[int, int]],
+                                   remaining: int, node_checked: bool,
+                                   stopped: bool = False,
+                                   reason: Optional[str] = None) -> Dict[str, Any]:
+        if start < 0 or end < start:
+            raise ValueError("reconciliation range must be a non-negative inclusive interval")
+        if remaining < 0:
+            raise ValueError("remaining must be non-negative")
+        uncovered = subtract(start, end, checked_ranges)
+        coverage_complete = not uncovered
+        if coverage_complete and node_checked and not remaining and not stopped:
+            status = "verified"
+        elif not node_checked or uncovered or stopped:
+            status = "incomplete"
+        else:
+            status = "issues"
+        now = _now()
+        doc = {
+            "kind": "reconciliation_range", "start": start, "end": end,
+            "status": status, "source_ranges": [list(r) for r in source_ranges],
+            "checked_ranges": [list(r) for r in checked_ranges],
+            "uncovered_ranges": [list(r) for r in uncovered],
+            "coverage_complete": coverage_complete, "node_checked": node_checked,
+            "remaining": remaining, "stopped": stopped, "last_checked_at": now,
+        }
+        if reason is not None:
+            doc["reason"] = reason
+        self.meta.update_one(
+            {"_id": f"reconciliation_range:{start}-{end}"},
+            {"$set": doc, "$setOnInsert": {"_id": f"reconciliation_range:{start}-{end}",
+                                           "created_at": now}},
+            upsert=True,
         )
+        return doc
 
     def _bundle_complete_numbers(self, start: int, end: int) -> Set[int]:
         bad = {item[0] for item in self.bundle_mismatches(start, end)}

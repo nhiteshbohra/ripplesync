@@ -1,0 +1,28 @@
+# TEMPLATE, NOT TESTED ON A NATIVE LINUX HOST.
+# Reports failed ingest units and a stale/lagging tail checkpoint to the system journal.
+
+[Unit]
+Description=XRPL ingest: service and checkpoint monitor
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=PYTHONUTF8=1 PYTHONUNBUFFERED=1 "XRPL_INGEST_HOME=@REPO_DIR@"
+ExecStart="/bin/bash" "@REPO_DIR@/setup/monitor_services.sh" "@REPO_DIR@"
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

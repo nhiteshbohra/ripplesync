@@ -1,0 +1,4 @@
+# Explicit inclusive range for the scheduled deep reconciliation service.
+# Copy to reconcile_range.txt and set both values before enabling xrpl-reconcile.timer.
+start=32570
+end=33570

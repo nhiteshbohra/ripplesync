@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pymongo.errors import AutoReconnect
@@ -9,7 +10,7 @@ from xrpl_ingest.backfill import process_chunk, run_backfill
 from xrpl_ingest.errors import ConnectFailed, RpcError, StopRequested
 from xrpl_ingest.fetcher import RetryPolicy
 from xrpl_ingest.store import LAST_LEDGER_ID
-from xrpl_ingest.tail import BIG_GAP, tail
+from xrpl_ingest.tail import BIG_GAP, _FencedTailStore, tail
 from xrpl_ingest.transform import parse_ledger_result
 
 
@@ -27,6 +28,21 @@ def test_first_run_on_empty_db_starts_at_current_ledger(store):
     assert run_tail(src, store, iterations=1) == 500
     assert src.calls == [500]
     assert store.get_checkpoint() == 500
+
+
+def test_stale_tail_owner_cannot_write_checkpoint(store):
+    now = datetime.now(timezone.utc)
+    token_a = store.claim_tail_lease("host-a", now=now, lease_seconds=300)
+    token_b = store.claim_tail_lease("host-b", now=now + timedelta(seconds=301))
+    assert token_b == 2
+    lost = []
+    fenced = _FencedTailStore(store, "host-a", token_a, lambda: lost.append(True))
+
+    with pytest.raises(StopRequested, match="live-tail lease was lost"):
+        fenced.set_checkpoint(500)
+
+    assert lost == [True]
+    assert store.get_checkpoint() == 0
 
 
 def store_ledgers(store, indices):

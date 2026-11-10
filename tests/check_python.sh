@@ -12,6 +12,7 @@ real_df="$(command -v df)"
 export MOCK_AWK="$real_awk" MOCK_DF="$real_df"
 mkdir -p "$work/bin" "$work/repo"
 cp "$project/requirements.txt" "$work/repo/"
+cp "$project/requirements-linux-py312-x86_64.lock" "$work/repo/"
 cat >"$work/bin/python-stub" <<'EOF'
 #!/usr/bin/env bash
 v=3.14

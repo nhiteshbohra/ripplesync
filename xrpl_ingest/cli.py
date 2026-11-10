@@ -12,6 +12,7 @@ import io
 import logging
 import os
 import sys
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -24,13 +25,13 @@ from .config import Config
 from .config import FIRST_LEDGER
 from .support.monitor import DiskGuard, LowDiskSpace
 from .errors import ConfigError, IngestError, NetworkMismatch, RpcError, StopRequested
-from .ledger_ranges import parse_complete_ledgers
+from .ledger_ranges import intersect, parse_complete_ledgers, subtract
 from .support.runcontrol import InstanceLock, LockHeld, lock_path
 from .support.logsetup import setup_logging
 from .source import WsSource
 from .recovery import recover_jobs
 from .support.runcontrol import StopFlag, any_of, install_stop_signal, stop_requested
-from .store import MongoStore
+from .store import MongoStore, TAIL_LEASE_SECONDS
 from .tail import tail
 
 log = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ exit codes:
   3    backfill had no failures, but the node lacks some requested ledgers
        (see its complete_ledgers)
   4    node or MongoDB unreachable / error
-  5    another instance of this command is already running (lock held)
+  5    another local instance holds this command's lock, or another host owns live tail
   6    unexpected internal error (a bug; the log has the traceback)
   130  interrupted (second Ctrl+C, or Ctrl+C in a command without graceful stop)"""
 
@@ -102,8 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between checks when no recovery job is due (default %(default)s)")
 
     reconcile = add("reconcile", "continuously compare stored ledgers with the source")
-    reconcile.add_argument("--start", type=int, required=True)
-    reconcile.add_argument("--end", type=int, required=True)
+    reconcile.add_argument("--start", type=int, default=None)
+    reconcile.add_argument("--end", type=int, default=None)
+    reconcile.add_argument("--range-file", metavar="PATH",
+                           help="read a bounded start/end range from this file")
     reconcile.add_argument("--interval", type=lambda value: positive_int(
         value, "--interval"), default=300, metavar="SECONDS",
         help="seconds between deep reconciliation passes (default %(default)s)")
@@ -191,7 +194,17 @@ def _cmd_tail(run: Run) -> int:
     store = run.store()
     guard = _disk_guard(run, store)
     store.ensure_indexes()
-    code = asyncio.run(_run_tail(run.cfg, store, run.stop))
+    worker_id = f"{os.getpid()}-{uuid.uuid4().hex}"
+    token = store.claim_tail_lease(worker_id, lease_seconds=TAIL_LEASE_SECONDS)
+    if token is None:
+        log.error("another host owns the live-tail lease")
+        return EXIT_LOCKED
+    try:
+        code = asyncio.run(_run_tail(run.cfg, store, run.stop, worker_id, token))
+    finally:
+        released = store.release_tail_lease(worker_id, token)
+        if not released:
+            log.warning("live-tail lease %s was already superseded", token)
     return EXIT_FAILED if guard.tripped else code
 
 
@@ -223,24 +236,50 @@ def _cmd_recover_gaps(run: Run) -> int:
 
 
 def _cmd_reconcile(run: Run) -> int:
-    if run.args.start < FIRST_LEDGER or run.args.end < run.args.start:
+    if run.args.range_file:
+        if run.args.start is not None or run.args.end is not None:
+            raise ValueError("--range-file cannot be combined with --start/--end")
+        rng = files.load_range(run.args.range_file, required=True)
+        start, end = rng.start, rng.end
+        if end is None:
+            raise ValueError("reconcile range file must set both start and end")
+    elif run.args.start is not None and run.args.end is not None:
+        start, end = run.args.start, run.args.end
+    else:
+        raise ValueError("reconcile requires both --start and --end, or --range-file")
+    if start < FIRST_LEDGER or end < start:
         raise ValueError(f"reconcile range must satisfy {FIRST_LEDGER} <= start <= end")
     store = run.store()
     guard = _disk_guard(run, store)
     source = WsSource.from_config(run.cfg, stop_check=run.stop)
     last_remaining = 0
+    coverage_complete = False
 
     async def reconcile() -> None:
-        nonlocal last_remaining
+        nonlocal last_remaining, coverage_complete
         try:
             while not run.stop():
                 ranges, _ = await discover_node(source)
                 from .repair import repair_range
                 summary = await repair_range(
-                    source, store, run.args.start, run.args.end, ranges,
+                    source, store, start, end, ranges,
                     retry=retry_policy(run.cfg), concurrency=run.cfg.concurrency,
                     stop_check=run.stop, emit=print, repair=False, deep=True)
                 last_remaining = summary.remaining
+                available = intersect(ranges, start, end)
+                missing = subtract(start, end, ranges)
+                coverage_complete = (
+                    not missing and summary.node_checked and not summary.stopped)
+                record = await asyncio.to_thread(
+                    store.record_reconciliation_pass, start, end,
+                    source_ranges=ranges, checked_ranges=available,
+                    remaining=summary.remaining, node_checked=summary.node_checked,
+                    stopped=summary.stopped,
+                    reason=("source does not cover the requested range" if missing else None))
+                print(
+                    f"reconciliation coverage {start}-{end}: {record['status']}; "
+                    f"checked={record['checked_ranges']} "
+                    f"uncovered={record['uncovered_ranges']}")
                 if run.args.once or run.stop():
                     break
                 for _ in range(run.args.interval):
@@ -252,7 +291,8 @@ def _cmd_reconcile(run: Run) -> int:
 
     store.ensure_indexes()
     asyncio.run(reconcile())
-    return EXIT_FAILED if last_remaining or run.stop() or guard.tripped else EXIT_OK
+    return EXIT_FAILED if (last_remaining or not coverage_complete
+                           or run.stop() or guard.tripped) else EXIT_OK
 
 
 def _cmd_data(run: Run) -> int:
@@ -461,14 +501,47 @@ def backfill_exit_code(summary: dict) -> int:
     return 3 if summary["unavailable_ranges"] else 0
 
 
-async def _run_tail(cfg: Config, store: MongoStore, stop) -> int:
-    source = WsSource.from_config(cfg, stop_check=stop)
+async def _run_tail(cfg: Config, store: MongoStore, stop, worker_id: str, token: int) -> int:
+    lease_lost = False
+    heartbeat_done = asyncio.Event()
+
+    def effective_stop() -> bool:
+        return stop() or lease_lost
+
+    def note_lease_lost() -> None:
+        nonlocal lease_lost
+        lease_lost = True
+
+    async def heartbeat() -> None:
+        nonlocal lease_lost
+        while not heartbeat_done.is_set():
+            try:
+                await asyncio.wait_for(
+                    heartbeat_done.wait(), timeout=TAIL_LEASE_SECONDS / 3)
+            except asyncio.TimeoutError:
+                try:
+                    renewed = await asyncio.to_thread(
+                        store.renew_tail_lease, worker_id, token,
+                        lease_seconds=TAIL_LEASE_SECONDS)
+                except Exception:
+                    log.exception("could not renew live-tail lease")
+                    lease_lost = True
+                    return
+                if not renewed:
+                    lease_lost = True
+                    return
+
+    source = WsSource.from_config(cfg, stop_check=effective_stop)
+    heartbeat_task = asyncio.create_task(heartbeat())
     try:
-        await tail(source, store, retry_policy(cfg), poll_interval=cfg.polling_interval_seconds,
-                   stop_check=stop)
+        await tail(
+            source, store, retry_policy(cfg), poll_interval=cfg.polling_interval_seconds,
+            stop_check=effective_stop, owner=(worker_id, token, note_lease_lost))
     finally:
         await source.close()
-    return 0
+        heartbeat_done.set()
+        await heartbeat_task
+    return EXIT_FAILED if lease_lost else EXIT_OK
 
 
 async def _run_retry(cfg: Config, store: MongoStore, rounds: int, stop) -> int:

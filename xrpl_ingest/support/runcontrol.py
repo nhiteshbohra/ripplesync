@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 MAX_READ_BYTES = 1024 * 1024  # bounded, but large enough for files edited by external tools
 CHECK_INTERVAL = 1.0  # StopFlag reads the file at most this often (seconds)
 ALL_KEY = "current_process"
-COMMAND_KEYS = ("tail", "backfill", "retry-failed")
+COMMAND_KEYS = ("tail", "backfill", "retry-failed", "recover-gaps", "reconcile")
 
 _signalled = False  # set by the signal handlers; per process
 _interrupts = 0  # SIGINTs seen by the graceful handler
